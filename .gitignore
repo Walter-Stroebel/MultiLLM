@@ -1,0 +1,22 @@
+target/
+*.class
+
+# real endpoint config may contain API keys — only endpoints.example.json is tracked
+config/endpoints.json
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.jar
+
+# NetBeans
+nbactions.xml
+nb-configuration.xml
+
+# Eclipse
+.project
+.classpath

@@ -1,0 +1,27 @@
+[
+    {
+        "name": "predator",
+        "url": "http://predator:8081",
+        "models": ["gemma-vision"],
+        "costTier": "free"
+    },
+    {
+        "name": "victus",
+        "url": "http://victus:8081",
+        "models": ["gemma-vision"],
+        "costTier": "free"
+    },
+    {
+        "name": "legion-ollama",
+        "url": "http://localhost:11434",
+        "models": ["llama3:70b"],
+        "costTier": "free"
+    },
+    {
+        "name": "openai-example",
+        "url": "https://api.openai.com",
+        "models": ["gpt-4o-mini"],
+        "costTier": "cheap",
+        "apiKey": "sk-replace-me"
+    }
+]
