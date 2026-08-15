@@ -83,6 +83,16 @@ final class LlamaClient {
         if (json) {
             body.putObject("response_format").put("type", "json_object");
         }
+        if (null != imageBase64) {
+            // llama-server's default --slot-prompt-similarity (0.10) can route two
+            // unrelated image requests to the same cached slot on as little as 10%
+            // prompt-token overlap, reusing that slot's cached KV state built around
+            // a *different* image — observed in practice as the model confidently
+            // answering as if no image were given. cache_prompt:false opts this
+            // request out of slot-cache reuse entirely; text-only requests keep
+            // caching since they don't carry this correctness risk.
+            body.put("cache_prompt", false);
+        }
 
         HttpRequest.Builder reqBuilder = HttpRequest.newBuilder()
                 .uri(URI.create(endpoint.url + "/v1/chat/completions"))

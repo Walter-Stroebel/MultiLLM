@@ -4,7 +4,7 @@
 package nl.infcomtec.multillm;
 
 import java.util.List;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.Semaphore;
 
 /**
  * One OpenAI-compatible chat-completions backend: a local llama-server or
@@ -21,11 +21,33 @@ final class Endpoint {
     final String apiKey;
 
     /**
-     * Requests currently in flight against this endpoint. Incremented
-     * before the HTTP call, decremented after — the router's
-     * least-busy-first signal.
+     * Hard concurrency gate: exactly one request in flight against this
+     * endpoint at a time, never more. Most local llama-server instances
+     * run with a single parallel slot (no {@code --parallel} override),
+     * and sending a second concurrent multimodal request has been
+     * observed to cross-contaminate context between requests — the model
+     * answers as if no image were given even though one was sent. A
+     * cloud endpoint has the same practical constraint from the other
+     * direction: hammering it with concurrent requests risks a rate-limit
+     * ban. So this is a real mutex, not a load-balancing heuristic.
      */
-    final AtomicInteger inFlight = new AtomicInteger(0);
+    private final Semaphore singleFlight = new Semaphore(1);
+
+    boolean tryAcquire() {
+        return singleFlight.tryAcquire();
+    }
+
+    void acquireUninterruptibly() {
+        singleFlight.acquireUninterruptibly();
+    }
+
+    void release() {
+        singleFlight.release();
+    }
+
+    boolean isBusy() {
+        return 0 == singleFlight.availablePermits();
+    }
 
     /**
      * Exponential moving average of observed tokens/second, updated after
@@ -84,7 +106,7 @@ final class Endpoint {
 
     @Override
     public String toString() {
-        return name + " (" + url + ", " + costTier + ", inFlight=" + inFlight.get()
+        return name + " (" + url + ", " + costTier + ", busy=" + isBusy()
                 + ", tokPerSec=" + String.format("%.1f", tokPerSecEma) + ")";
     }
 }
