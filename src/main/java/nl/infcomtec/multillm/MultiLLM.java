@@ -38,6 +38,6 @@ public final class MultiLLM {
 
         Router router = new Router(endpoints);
         LlamaClient.Reply reply = router.route(model, prompt.toString(), false);
-        System.out.println(reply.content);
+        System.out.println("[served by " + reply.servedBy + "] " + reply.content);
     }
 }

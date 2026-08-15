@@ -36,6 +36,11 @@ final class Router {
     }
 
     LlamaClient.Reply route(String model, String prompt, boolean json) throws IOException, InterruptedException {
+        return route(model, prompt, json, null);
+    }
+
+    LlamaClient.Reply route(String model, String prompt, boolean json, String imageBase64)
+            throws IOException, InterruptedException {
         List<Endpoint> candidates = rank(model);
         if (candidates.isEmpty()) {
             throw new IllegalArgumentException("No endpoint currently available for model: " + model);
@@ -44,7 +49,7 @@ final class Router {
         for (Endpoint chosen : candidates) {
             chosen.inFlight.incrementAndGet();
             try {
-                LlamaClient.Reply reply = LlamaClient.ask(chosen, model, prompt, json);
+                LlamaClient.Reply reply = LlamaClient.ask(chosen, model, prompt, json, imageBase64);
                 if (reply.millis > 0) {
                     chosen.recordTokPerSec(1000.0 * reply.completionTokens / reply.millis);
                 }

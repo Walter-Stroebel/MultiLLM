@@ -13,8 +13,8 @@
     },
     {
         "name": "legion-ollama",
-        "url": "http://localhost:11434",
-        "models": ["llama3:70b"],
+        "url": "http://legion:11434",
+        "models": ["mistral:latest"],
         "costTier": "free"
     },
     {

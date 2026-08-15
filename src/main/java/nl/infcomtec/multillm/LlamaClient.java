@@ -34,11 +34,13 @@ final class LlamaClient {
         final String content;
         final int completionTokens;
         final long millis;
+        final String servedBy;
 
-        Reply(String content, int completionTokens, long millis) {
+        Reply(String content, int completionTokens, long millis, String servedBy) {
             this.content = content;
             this.completionTokens = completionTokens;
             this.millis = millis;
+            this.servedBy = servedBy;
         }
     }
 
@@ -49,11 +51,34 @@ final class LlamaClient {
      */
     static Reply ask(Endpoint endpoint, String model, String prompt, boolean json)
             throws IOException, InterruptedException {
+        return ask(endpoint, model, prompt, json, null);
+    }
+
+    /**
+     * Same as {@link #ask(Endpoint, String, String, boolean)}, but when
+     * {@code imageBase64} is non-null the message content becomes the
+     * OpenAI-compatible multimodal array (text part + a
+     * {@code data:image/png;base64,...} image_url part) instead of a
+     * plain string — the shape both llama-server's vision-capable
+     * gemma-vision alias and Ollama's OpenAI-compatible endpoint expect.
+     */
+    static Reply ask(Endpoint endpoint, String model, String prompt, boolean json, String imageBase64)
+            throws IOException, InterruptedException {
         ObjectNode body = MAPPER.createObjectNode();
         body.put("model", model);
         ObjectNode message = MAPPER.createObjectNode();
         message.put("role", "user");
-        message.put("content", prompt);
+        if (null == imageBase64) {
+            message.put("content", prompt);
+        } else {
+            var content = message.putArray("content");
+            ObjectNode textPart = content.addObject();
+            textPart.put("type", "text");
+            textPart.put("text", prompt);
+            ObjectNode imagePart = content.addObject();
+            imagePart.put("type", "image_url");
+            imagePart.putObject("image_url").put("url", "data:image/png;base64," + imageBase64);
+        }
         body.putArray("messages").add(message);
         if (json) {
             body.putObject("response_format").put("type", "json_object");
@@ -98,6 +123,6 @@ final class LlamaClient {
         if (null != usage && usage.has("completion_tokens")) {
             completionTokens = usage.get("completion_tokens").asInt();
         }
-        return new Reply(content, completionTokens, elapsed);
+        return new Reply(content, completionTokens, elapsed, endpoint.name);
     }
 }
