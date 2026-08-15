@@ -69,8 +69,20 @@ final class LlamaClient {
         }
 
         long start = System.currentTimeMillis();
-        HttpResponse<String> resp = HTTP.send(reqBuilder.build(), HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> resp;
+        try {
+            resp = HTTP.send(reqBuilder.build(), HttpResponse.BodyHandlers.ofString());
+        } catch (IOException e) {
+            // HttpClient throws IOException (ConnectException, HttpTimeoutException,
+            // etc.) when the endpoint itself can't be reached — distinct from a
+            // successful connection that returns a bad payload.
+            throw new EndpointUnreachableException("Cannot reach " + endpoint.name + " at " + endpoint.url, e);
+        }
         long elapsed = System.currentTimeMillis() - start;
+        if (500 <= resp.statusCode()) {
+            throw new EndpointUnreachableException("Chat completion failed on " + endpoint.name
+                    + ": HTTP " + resp.statusCode() + " " + resp.body());
+        }
         if (200 != resp.statusCode()) {
             throw new IOException("Chat completion failed on " + endpoint.name
                     + ": HTTP " + resp.statusCode() + " " + resp.body());

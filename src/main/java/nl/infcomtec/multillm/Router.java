@@ -10,21 +10,24 @@ import java.util.List;
 
 /**
  * Picks one endpoint per request from the pool and routes the call
- * there. Policy, in order:
+ * there, falling back to the next-ranked candidate if the chosen
+ * endpoint is unreachable. Ranking, in order:
  * <ol>
- * <li>Filter to endpoints that serve the requested model.</li>
- * <li>Filter by cost: free endpoints first; only fall through to
- * cheap, then expensive, when no cheaper tier has a candidate — an
- * expensive endpoint is never picked while a free one could serve the
- * same model.</li>
- * <li>Among the surviving candidates, pick least-busy (fewest
- * in-flight requests), tie-broken by highest observed tokens/second.</li>
+ * <li>Filter to endpoints that serve the requested model and are not
+ * in cooldown.</li>
+ * <li>Sort by cost tier: free before cheap before expensive — a free
+ * endpoint is always tried before a paid one, even as a fallback.</li>
+ * <li>Within a tier, least-busy (fewest in-flight requests) first,
+ * tie-broken by highest observed tokens/second.</li>
  * </ol>
- * The in-flight counter is the live self-balancing signal; tokens/sec
- * is a self-measured quality tiebreak, not a user-supplied number —
- * neither requires the caller to evaluate hardware.
+ * On {@link EndpointUnreachableException} the failed endpoint is put
+ * into cooldown and the next candidate in rank order is tried. A
+ * malformed response or client error is not retried — that's a real
+ * bug, not a transient outage, and gets surfaced immediately.
  */
 final class Router {
+
+    private static final long COOLDOWN_MILLIS = 30_000L;
 
     private final List<Endpoint> endpoints;
 
@@ -33,34 +36,40 @@ final class Router {
     }
 
     LlamaClient.Reply route(String model, String prompt, boolean json) throws IOException, InterruptedException {
-        Endpoint chosen = pick(model);
-        chosen.inFlight.incrementAndGet();
-        try {
-            LlamaClient.Reply reply = LlamaClient.ask(chosen, model, prompt, json);
-            if (reply.millis > 0) {
-                chosen.recordTokPerSec(1000.0 * reply.completionTokens / reply.millis);
-            }
-            return reply;
-        } finally {
-            chosen.inFlight.decrementAndGet();
+        List<Endpoint> candidates = rank(model);
+        if (candidates.isEmpty()) {
+            throw new IllegalArgumentException("No endpoint currently available for model: " + model);
         }
+        IOException lastFailure = null;
+        for (Endpoint chosen : candidates) {
+            chosen.inFlight.incrementAndGet();
+            try {
+                LlamaClient.Reply reply = LlamaClient.ask(chosen, model, prompt, json);
+                if (reply.millis > 0) {
+                    chosen.recordTokPerSec(1000.0 * reply.completionTokens / reply.millis);
+                }
+                return reply;
+            } catch (EndpointUnreachableException e) {
+                chosen.coolDown(COOLDOWN_MILLIS);
+                lastFailure = e;
+            } finally {
+                chosen.inFlight.decrementAndGet();
+            }
+        }
+        throw lastFailure;
     }
 
-    private Endpoint pick(String model) {
-        for (CostTier tier : CostTier.values()) {
-            List<Endpoint> candidates = new ArrayList<>();
-            for (Endpoint e : endpoints) {
-                if (e.costTier == tier && e.servesModel(model)) {
-                    candidates.add(e);
-                }
-            }
-            if (!candidates.isEmpty()) {
-                candidates.sort(Comparator
-                        .<Endpoint>comparingInt(e -> e.inFlight.get())
-                        .thenComparing(Comparator.<Endpoint>comparingDouble(e -> e.tokPerSecEma).reversed()));
-                return candidates.get(0);
+    private List<Endpoint> rank(String model) {
+        List<Endpoint> candidates = new ArrayList<>();
+        for (Endpoint e : endpoints) {
+            if (e.servesModel(model) && !e.isCoolingDown()) {
+                candidates.add(e);
             }
         }
-        throw new IllegalArgumentException("No endpoint serves model: " + model);
+        candidates.sort(Comparator
+                .<Endpoint, CostTier>comparing(e -> e.costTier)
+                .thenComparingInt(e -> e.inFlight.get())
+                .thenComparing(Comparator.<Endpoint>comparingDouble(e -> e.tokPerSecEma).reversed()));
+        return candidates;
     }
 }

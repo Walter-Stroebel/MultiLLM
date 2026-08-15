@@ -34,6 +34,15 @@ final class Endpoint {
      */
     volatile double tokPerSecEma = 0.0;
 
+    /**
+     * Epoch millis until which this endpoint should be skipped by the
+     * router, set after a connection failure (box unreachable, service
+     * down) — not after an application-level error, which is a real bug
+     * worth surfacing rather than hiding behind a retry. Zero means no
+     * active cooldown.
+     */
+    volatile long cooldownUntilMillis = 0L;
+
     Endpoint(String name, String url, List<String> models, CostTier costTier, String apiKey) {
         this.name = name;
         this.url = url;
@@ -44,6 +53,20 @@ final class Endpoint {
 
     boolean servesModel(String model) {
         return models.contains(model);
+    }
+
+    boolean isCoolingDown() {
+        return System.currentTimeMillis() < cooldownUntilMillis;
+    }
+
+    /**
+     * Marks this endpoint unreachable for the given duration — called
+     * after a connection failure so a genuinely-down box doesn't keep
+     * consuming the router's first-choice slot on every subsequent
+     * request until it recovers.
+     */
+    void coolDown(long durationMillis) {
+        cooldownUntilMillis = System.currentTimeMillis() + durationMillis;
     }
 
     /**
