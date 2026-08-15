@@ -20,3 +20,6 @@ nb-configuration.xml
 # Eclipse
 .project
 .classpath
+
+# Claude Code harness state
+.claude/
