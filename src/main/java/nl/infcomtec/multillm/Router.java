@@ -48,16 +48,22 @@ import java.util.concurrent.ExecutionException;
  * one. The caller only sees a hard failure once every endpoint serving
  * the model has been tried and failed, or a hard attempt cap is hit.
  * <p>
- * "First idle worker to see the queue wins" already produces a fair
- * split by request count, verified under real 60s concurrent load
- * (near-even three-way split across predator/victus/legion). A slow
- * worker showing a much larger share of total GPU-time despite an equal
- * request count (~75% for legion in that same run) is not something
- * this router corrects for on purpose — it's the honest, correct
- * consequence of that worker's hardware taking longer per request. Three
- * workers, one queue, whoever finishes first grabs the next item; a
- * consistently slow worker naturally ends up idle less and busy longer,
- * exactly as it should.
+ * "First idle worker to see the queue wins" only actually shares the
+ * queue for items every worker could take. A worker was previously
+ * hard-restricted to items whose requested model it literally serves —
+ * so an item asking for a model only one endpoint has ever loaded could
+ * never be picked up by any other idle worker, no matter how long it
+ * sat there. Watched live: two idle diggers standing around while one
+ * slow digger worked through the last twenty holes alone, because those
+ * holes were typed "only this digger's shovel fits" even though any
+ * shovel could dig a hole. {@code model} is now a soft preference, not
+ * a hard requirement — a worker takes a matching item first if one's
+ * available, but an idle worker with nothing matching will take *any*
+ * unclaimed item and answer with whatever model it actually runs,
+ * rather than stand idle while a backlog piles onto one worker. No
+ * worker's speed is assumed fixed either — a request that took one
+ * worker a second can take the same worker a full minute next time;
+ * eligibility is decided fresh per item, never cached or precomputed.
  */
 final class Router {
 
@@ -83,7 +89,9 @@ final class Router {
 
     LlamaClient.Reply route(String model, String prompt, boolean json, String imageBase64)
             throws IOException, InterruptedException {
-        requireModelServed(model);
+        if (endpoints.isEmpty()) {
+            throw new IllegalArgumentException("No endpoints configured");
+        }
         WorkItem item = new WorkItem(model, prompt, json, imageBase64);
         enqueue(item);
         try {
@@ -98,15 +106,6 @@ final class Router {
             }
             throw new IOException(cause);
         }
-    }
-
-    private void requireModelServed(String model) {
-        for (Endpoint e : endpoints) {
-            if (e.servesModel(model)) {
-                return;
-            }
-        }
-        throw new IllegalArgumentException("No endpoint configured for model: " + model);
     }
 
     private void enqueue(WorkItem item) {
@@ -163,13 +162,28 @@ final class Router {
             synchronized (queueLock) {
                 while (true) {
                     if (!endpoint.isCoolingDown()) {
-                        var it = queue.iterator();
-                        while (it.hasNext()) {
-                            WorkItem candidate = it.next();
-                            if (endpoint.servesModel(candidate.model) && !candidate.triedAndFailed.contains(endpoint)) {
-                                it.remove();
-                                return candidate;
-                            }
+                        // Preferred pass: an item whose requested model this endpoint
+                        // actually serves. Checked first so a naturally-matching idle
+                        // worker isn't beaten to its own preferred item by a
+                        // cross-model helper on the same wake.
+                        WorkItem preferred = scanFor(candidate -> endpoint.servesModel(candidate.model));
+                        if (null != preferred) {
+                            queue.remove(preferred);
+                            return preferred;
+                        }
+                        // Fallback pass: this worker serves nothing the remaining
+                        // items asked for, but it's idle and they're waiting — take
+                        // any unclaimed item rather than stand around. It'll answer
+                        // using its own primaryModel(), not the item's request. Image
+                        // items are excluded unless this endpoint actually has vision
+                        // — "model is a preference" stops at capability: a text-only
+                        // endpoint substituting for a different text model is a
+                        // legitimate fallback, substituting for a vision request it
+                        // structurally cannot fulfill is not.
+                        WorkItem any = scanFor(candidate -> null == candidate.imageBase64 || endpoint.vision);
+                        if (null != any) {
+                            queue.remove(any);
+                            return any;
                         }
                     }
                     try {
@@ -187,9 +201,20 @@ final class Router {
             }
         }
 
+        /** Must be called while holding queueLock. */
+        private WorkItem scanFor(java.util.function.Predicate<WorkItem> modelMatch) {
+            for (WorkItem candidate : queue) {
+                if (!candidate.triedAndFailed.contains(endpoint) && modelMatch.test(candidate)) {
+                    return candidate;
+                }
+            }
+            return null;
+        }
+
         private void process(WorkItem item) {
+            String modelToUse = endpoint.servesModel(item.model) ? item.model : endpoint.primaryModel();
             try {
-                LlamaClient.Reply reply = LlamaClient.ask(endpoint, item.model, item.prompt, item.json, item.imageBase64);
+                LlamaClient.Reply reply = LlamaClient.ask(endpoint, modelToUse, item.prompt, item.json, item.imageBase64);
                 if (null != item.imageBase64 && looksLikeMissingImage(reply.content)) {
                     endpoint.coolDown(COOLDOWN_MILLIS);
                     requeueOrFail(item, new IOException(endpoint.name + " returned a reply indicating no image "

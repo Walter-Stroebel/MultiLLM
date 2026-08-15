@@ -13,9 +13,10 @@ import java.util.List;
 /**
  * Loads the endpoint pool from a JSON config file. Deliberately dumb:
  * the file states only what a non-expert user already knows (name,
- * URL, which models are loaded, a coarse free/cheap/expensive cost
- * tier, and an optional API key) — nothing measured or scored goes in
- * this file, since that's the router's job at runtime.
+ * URL, which models are loaded, whether it can accept images, a coarse
+ * free/cheap/expensive cost tier, and an optional API key) — nothing
+ * measured or scored goes in this file, since that's the router's job
+ * at runtime.
  */
 final class EndpointConfig {
 
@@ -38,7 +39,8 @@ final class EndpointConfig {
                     ? CostTier.valueOf(node.get("costTier").asText().toUpperCase())
                     : CostTier.FREE;
             String apiKey = node.has("apiKey") ? node.get("apiKey").asText() : null;
-            endpoints.add(new Endpoint(name, url, models, tier, apiKey));
+            boolean vision = node.has("vision") && node.get("vision").asBoolean();
+            endpoints.add(new Endpoint(name, url, models, tier, apiKey, vision));
         }
         return endpoints;
     }

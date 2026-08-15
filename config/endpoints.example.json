@@ -3,13 +3,15 @@
         "name": "predator",
         "url": "http://predator:8081",
         "models": ["gemma-vision"],
-        "costTier": "free"
+        "costTier": "free",
+        "vision": true
     },
     {
         "name": "victus",
         "url": "http://victus:8081",
         "models": ["gemma-vision"],
-        "costTier": "free"
+        "costTier": "free",
+        "vision": true
     },
     {
         "name": "legion-ollama",

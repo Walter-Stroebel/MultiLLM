@@ -23,6 +23,19 @@ final class Endpoint {
     final String apiKey;
 
     /**
+     * Whether this endpoint can accept image content at all. {@code model}
+     * being a soft preference (any idle endpoint can help with any item)
+     * stops at this boundary — a text-only endpoint answering a
+     * text-preferring item with its own model is a legitimate substitution,
+     * but handing an image-bearing item to an endpoint with no vision
+     * capability isn't a preference miss, it's a request the endpoint
+     * cannot actually fulfill. Declared explicitly in config rather than
+     * inferred from the model name, matching the same "state what you
+     * know, don't make the code guess" config philosophy as costTier.
+     */
+    final boolean vision;
+
+    /**
      * Exponential moving average of observed tokens/second, updated after
      * every completed call. Zero until the first call returns.
      */
@@ -37,16 +50,26 @@ final class Endpoint {
      */
     volatile long cooldownUntilMillis = 0L;
 
-    Endpoint(String name, String url, List<String> models, CostTier costTier, String apiKey) {
+    Endpoint(String name, String url, List<String> models, CostTier costTier, String apiKey, boolean vision) {
         this.name = name;
         this.url = url;
         this.models = models;
         this.costTier = costTier;
         this.apiKey = apiKey;
+        this.vision = vision;
     }
 
     boolean servesModel(String model) {
         return models.contains(model);
+    }
+
+    /**
+     * The model name this endpoint sends when answering a request it
+     * wasn't the preferred/requested target for — its own first declared
+     * model, since that's the one it's actually configured to run.
+     */
+    String primaryModel() {
+        return models.get(0);
     }
 
     boolean isCoolingDown() {

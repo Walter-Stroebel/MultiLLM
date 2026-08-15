@@ -35,12 +35,14 @@ final class LlamaClient {
         final int completionTokens;
         final long millis;
         final String servedBy;
+        final String servedModel;
 
-        Reply(String content, int completionTokens, long millis, String servedBy) {
+        Reply(String content, int completionTokens, long millis, String servedBy, String servedModel) {
             this.content = content;
             this.completionTokens = completionTokens;
             this.millis = millis;
             this.servedBy = servedBy;
+            this.servedModel = servedModel;
         }
     }
 
@@ -133,6 +135,6 @@ final class LlamaClient {
         if (null != usage && usage.has("completion_tokens")) {
             completionTokens = usage.get("completion_tokens").asInt();
         }
-        return new Reply(content, completionTokens, elapsed, endpoint.name);
+        return new Reply(content, completionTokens, elapsed, endpoint.name, model);
     }
 }
