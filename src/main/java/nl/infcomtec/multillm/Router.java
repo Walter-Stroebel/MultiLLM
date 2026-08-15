@@ -4,7 +4,6 @@
 package nl.infcomtec.multillm;
 
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
@@ -20,54 +19,64 @@ import java.util.concurrent.ExecutionException;
  * directly; that produced two distinct, hard-to-diagnose deadlocks under
  * real concurrent load. The second gave each worker its own private
  * queue and assigned each new item to whichever worker's queue was
- * shortest at assignment time — that looked reasonable but was still
- * wrong: queue length at assignment time says nothing about how long a
- * worker takes to drain each item. A slow worker (Ollama's mistral on
- * legion, several seconds per request) got the same share of requests
- * as fast ones (predator/victus's gemma-vision, often under a second)
- * and ended up doing ~87% of total GPU-time under real 60-second load
- * while its queue rarely looked backed up — fast workers were
- * effectively punished for finishing quickly by getting assigned more
- * work up front to "balance" a queue-length snapshot that didn't
- * reflect actual throughput. With one shared queue, a worker only ever
- * takes its next item once it's actually free, so throughput
- * self-balances by real completion speed — no bookkeeping needed.
+ * shortest at assignment time — that punished fast workers for finishing
+ * quickly, since queue length at assignment time says nothing about how
+ * long a worker takes to drain each item. With one shared queue, a
+ * worker only ever takes its next item once it's actually free, so
+ * throughput self-balances by real completion speed.
  * <p>
- * Cost tier is a soft preference, not a guaranteed ordering: any
- * eligible idle worker may claim any item it serves. A strict
- * free-before-paid guarantee would require re-introducing central
- * assignment coordination, which is exactly the source of the two
- * earlier bugs — free/local endpoints are the common case and tend to
- * be faster and more available, so they end up serving most traffic in
- * practice without that being enforced as a hard rule.
+ * {@code model} is a soft preference, not a hard requirement: a worker
+ * checks for a preferred-model item first, but an idle worker with
+ * nothing matching takes any unclaimed item and answers using its own
+ * model instead of standing idle — verified live via GPU monitoring
+ * across three real machines: an idle worker previously could never help
+ * drain another model's backlog, so two boxes sat at baseline temperature
+ * while a third alone worked through a growing queue. Vision is the one
+ * hard capability boundary this preference doesn't cross — an
+ * image-bearing item is only ever eligible for a worker whose endpoint
+ * declares {@code vision}.
  * <p>
  * A worker that fails an item (endpoint unreachable, or a corrupted
  * vision reply) cools that endpoint down and puts the item back on the
- * shared queue for a different worker to pick up, remembering which
- * endpoints have already failed it so it never lands back on the same
- * one. The caller only sees a hard failure once every endpoint serving
- * the model has been tried and failed, or a hard attempt cap is hit.
+ * shared queue for a different worker to pick up. Two cooldown lengths,
+ * not one: a confirmed connectivity failure is a hard signal worth a
+ * real ({@link #UNREACHABLE_COOLDOWN_MILLIS}) penalty, but a detected
+ * corrupted reply is a much softer one — real, measured incident:
+ * applying the same 30s penalty to both endpoints in a 2-endpoint vision
+ * pool, after two corrupted replies landed a second apart, zeroed out
+ * all vision capacity for the full cooldown window, since no other
+ * endpoint could take over. {@link #CORRUPTED_REPLY_COOLDOWN_MILLIS} is
+ * far shorter, and {@link Worker#isLastVisionEndpointStanding()} skips
+ * the cooldown entirely rather than ever drop a capability to zero.
  * <p>
- * "First idle worker to see the queue wins" only actually shares the
- * queue for items every worker could take. A worker was previously
- * hard-restricted to items whose requested model it literally serves —
- * so an item asking for a model only one endpoint has ever loaded could
- * never be picked up by any other idle worker, no matter how long it
- * sat there. Watched live: two idle diggers standing around while one
- * slow digger worked through the last twenty holes alone, because those
- * holes were typed "only this digger's shovel fits" even though any
- * shovel could dig a hole. {@code model} is now a soft preference, not
- * a hard requirement — a worker takes a matching item first if one's
- * available, but an idle worker with nothing matching will take *any*
- * unclaimed item and answer with whatever model it actually runs,
- * rather than stand idle while a backlog piles onto one worker. No
- * worker's speed is assumed fixed either — a request that took one
- * worker a second can take the same worker a full minute next time;
- * eligibility is decided fresh per item, never cached or precomputed.
+ * A failed attempt is remembered only briefly per endpoint
+ * ({@link WorkItem#recentlyFailedBy}), not permanently — a real, observed
+ * deadlock came from an earlier version that blacklisted an endpoint from
+ * an item forever after one failure: with only two vision-capable
+ * endpoints, an item that failed on both once each could never be
+ * retried by anyone again, even after both cooldowns lapsed, since
+ * nothing ever cleared the "already tried this one" record. The give-up
+ * ceiling is a genuine attempt counter instead.
  */
 final class Router {
 
-    private static final long COOLDOWN_MILLIS = 30_000L;
+    /**
+     * Cooldown after a confirmed connectivity failure (box down, refused,
+     * timed out) — a hard signal the endpoint is genuinely unreachable
+     * right now, worth a real penalty before retrying it.
+     */
+    private static final long UNREACHABLE_COOLDOWN_MILLIS = 30_000L;
+
+    /**
+     * Cooldown after a detected corrupted reply — much softer than an
+     * outage; a few seconds is enough to let a contaminated slot clear
+     * without freezing an entire capability class.
+     */
+    private static final long CORRUPTED_REPLY_COOLDOWN_MILLIS = 3_000L;
+
+    /** Grace window during which an endpoint that just failed an item won't re-grab it. */
+    private static final long RECENT_FAILURE_GRACE_MILLIS = 1_000L;
+
     private static final int MAX_ATTEMPTS_PER_ITEM = 8;
 
     private final List<Endpoint> endpoints;
@@ -129,15 +138,18 @@ final class Router {
                 || lower.contains("please provide the") && lower.contains("image")
                 || lower.contains("no image") && lower.contains("provided")
                 || lower.contains("i don't see an image")
-                || lower.contains("i do not see an image");
+                || lower.contains("i do not see an image")
+                || lower.contains("cannot") && lower.contains("see") && lower.contains("image")
+                || lower.contains("unable to") && lower.contains("see") && lower.contains("image")
+                || lower.contains("as a text-based") && (lower.contains("model") || lower.contains("ai"))
+                || lower.contains("i can only process the") && lower.contains("text");
     }
 
     /**
      * One endpoint's processing loop against the single shared queue.
-     * Scans for the first item it's eligible for (serves the model,
-     * hasn't already failed this item, endpoint not cooling down) each
-     * time it wakes, rather than blindly taking the queue head — the
-     * head might be a model this worker doesn't serve.
+     * Scans for the first item it's eligible for each time it wakes,
+     * rather than blindly taking the queue head — the head might be a
+     * model this worker doesn't serve, or an item it just failed.
      */
     private final class Worker implements Runnable {
 
@@ -176,10 +188,7 @@ final class Router {
                         // any unclaimed item rather than stand around. It'll answer
                         // using its own primaryModel(), not the item's request. Image
                         // items are excluded unless this endpoint actually has vision
-                        // — "model is a preference" stops at capability: a text-only
-                        // endpoint substituting for a different text model is a
-                        // legitimate fallback, substituting for a vision request it
-                        // structurally cannot fulfill is not.
+                        // — "model is a preference" stops at capability.
                         WorkItem any = scanFor(candidate -> null == candidate.imageBase64 || endpoint.vision);
                         if (null != any) {
                             queue.remove(any);
@@ -201,10 +210,28 @@ final class Router {
             }
         }
 
+        /**
+         * True if no other vision-capable endpoint in the whole pool is
+         * currently able to serve a vision request — meaning cooling this
+         * one down too would drop vision capacity to zero rather than
+         * merely reduce it.
+         */
+        private boolean isLastVisionEndpointStanding() {
+            for (Endpoint e : endpoints) {
+                if (e != endpoint && e.vision && !e.isCoolingDown()) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         /** Must be called while holding queueLock. */
         private WorkItem scanFor(java.util.function.Predicate<WorkItem> modelMatch) {
             for (WorkItem candidate : queue) {
-                if (!candidate.triedAndFailed.contains(endpoint) && modelMatch.test(candidate)) {
+                Long failedAt = candidate.recentlyFailedBy.get(endpoint);
+                boolean recentlyFailedHere = null != failedAt
+                        && System.currentTimeMillis() - failedAt < RECENT_FAILURE_GRACE_MILLIS;
+                if (!recentlyFailedHere && modelMatch.test(candidate)) {
                     return candidate;
                 }
             }
@@ -216,7 +243,9 @@ final class Router {
             try {
                 LlamaClient.Reply reply = LlamaClient.ask(endpoint, modelToUse, item.prompt, item.json, item.imageBase64);
                 if (null != item.imageBase64 && looksLikeMissingImage(reply.content)) {
-                    endpoint.coolDown(COOLDOWN_MILLIS);
+                    if (!isLastVisionEndpointStanding()) {
+                        endpoint.coolDown(CORRUPTED_REPLY_COOLDOWN_MILLIS);
+                    }
                     requeueOrFail(item, new IOException(endpoint.name + " returned a reply indicating no image "
                             + "was received despite one being sent — likely concurrent-request context contamination"));
                     return;
@@ -226,7 +255,7 @@ final class Router {
                 }
                 item.future.complete(reply);
             } catch (EndpointUnreachableException e) {
-                endpoint.coolDown(COOLDOWN_MILLIS);
+                endpoint.coolDown(UNREACHABLE_COOLDOWN_MILLIS);
                 requeueOrFail(item, e);
             } catch (IOException | InterruptedException e) {
                 // A malformed response or other non-connectivity error is a real bug,
@@ -237,8 +266,8 @@ final class Router {
         }
 
         private void requeueOrFail(WorkItem item, IOException failure) {
-            item.triedAndFailed.add(endpoint);
-            if (item.triedAndFailed.size() >= MAX_ATTEMPTS_PER_ITEM || item.triedAndFailed.size() >= endpoints.size()) {
+            item.recentlyFailedBy.put(endpoint, System.currentTimeMillis());
+            if (item.attemptCount.incrementAndGet() >= MAX_ATTEMPTS_PER_ITEM) {
                 item.future.completeExceptionally(failure);
                 return;
             }

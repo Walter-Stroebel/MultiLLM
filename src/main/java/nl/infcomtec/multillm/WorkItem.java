@@ -3,7 +3,10 @@
  */
 package nl.infcomtec.multillm;
 
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * One unit of routed work: a request waiting to be picked up by whichever
@@ -21,13 +24,20 @@ final class WorkItem {
     final CompletableFuture<LlamaClient.Reply> future = new CompletableFuture<>();
 
     /**
-     * Endpoints already tried and failed for this item, so a requeue
-     * never lands back on a worker that just failed it — that worker
-     * would either fail it again for the same reason (a real, sustained
-     * outage) or, for a corrupted-reply detection, needlessly cool down
-     * further before the next legitimate use.
+     * Epoch millis of the last failure on each endpoint, kept only briefly
+     * (checked against a short grace window in {@code Router.scanFor}) so
+     * the endpoint that just failed this item doesn't immediately re-grab
+     * it before another idle endpoint gets a look — not a permanent
+     * blacklist. A permanent per-endpoint blacklist was a real, observed
+     * deadlock: with only two vision-capable endpoints, an item that
+     * failed on both once each could never be retried by anyone again,
+     * even after both endpoints' cooldowns lapsed, since nothing ever
+     * cleared the "already tried this one" record.
      */
-    final java.util.Set<Endpoint> triedAndFailed = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    final Map<Endpoint, Long> recentlyFailedBy = new ConcurrentHashMap<>();
+
+    /** Total attempts across all endpoints, for the give-up ceiling. */
+    final AtomicInteger attemptCount = new AtomicInteger(0);
 
     WorkItem(String model, String prompt, boolean json, String imageBase64) {
         this.model = model;

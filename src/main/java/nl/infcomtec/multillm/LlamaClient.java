@@ -6,12 +6,14 @@ package nl.infcomtec.multillm;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
 import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.time.Duration;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
 
 /**
  * Plain OpenAI-compatible chat-completions client, per {@code ttok}'s
@@ -20,11 +22,29 @@ import java.time.Duration;
  * since that has become the de-facto standard regardless of who is
  * serving the model. One-shot, stateless calls only, matching the
  * "each call is an ant: local, ignorant, disposable" model.
+ * <p>
+ * Uses {@link HttpURLConnection} (opened fresh per call via
+ * {@link URL#openConnection()}), not {@code java.net.http.HttpClient}.
+ * Checked, not assumed: {@code HttpClient.newHttpClient().version()}
+ * reports {@code HTTP_2} by default — it attempts HTTP/2 upgrade
+ * negotiation against every endpoint, including plain HTTP/1.1-only
+ * local servers like llama-server. Real, observed symptom under
+ * concurrent multi-endpoint load: llama-server's own log showed every
+ * request processed in under two seconds once it arrived, but requests
+ * sat for gaps of up to several minutes before arriving at all — the
+ * delay was entirely client-side, before the request was even sent
+ * over the wire, consistent with protocol negotiation overhead rather
+ * than anything server-side. {@code HttpURLConnection} predates
+ * HTTP/2 entirely — no negotiation, no shared connection pool or
+ * executor to reason about — while still handling chunked encoding,
+ * Content-Length framing, and TLS correctly instead of that being
+ * hand-rolled here.
  */
 final class LlamaClient {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final HttpClient HTTP = HttpClient.newHttpClient();
+    private static final int CONNECT_TIMEOUT_MILLIS = 10_000;
+    private static final int READ_TIMEOUT_MILLIS = 120_000;
 
     private LlamaClient() {
     }
@@ -95,39 +115,51 @@ final class LlamaClient {
             // caching since they don't carry this correctness risk.
             body.put("cache_prompt", false);
         }
+        byte[] bodyBytes = MAPPER.writeValueAsString(body).getBytes(StandardCharsets.UTF_8);
 
-        HttpRequest.Builder reqBuilder = HttpRequest.newBuilder()
-                .uri(URI.create(endpoint.url + "/v1/chat/completions"))
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body)))
-                .timeout(Duration.ofMinutes(2));
-        if (null != endpoint.apiKey) {
-            reqBuilder.header("Authorization", "Bearer " + endpoint.apiKey);
-        }
+        URI uri = URI.create(endpoint.url + "/v1/chat/completions");
 
         long start = System.currentTimeMillis();
-        HttpResponse<String> resp;
+        String responseBody;
+        int statusCode;
         try {
-            resp = HTTP.send(reqBuilder.build(), HttpResponse.BodyHandlers.ofString());
-        } catch (IOException e) {
-            // HttpClient throws IOException (ConnectException, HttpTimeoutException,
-            // etc.) when the endpoint itself can't be reached — distinct from a
-            // successful connection that returns a bad payload.
+            HttpURLConnection conn = (HttpURLConnection) uri.toURL().openConnection();
+            conn.setRequestMethod("POST");
+            conn.setDoOutput(true);
+            conn.setConnectTimeout(CONNECT_TIMEOUT_MILLIS);
+            conn.setReadTimeout(READ_TIMEOUT_MILLIS);
+            conn.setRequestProperty("Content-Type", "application/json");
+            if (null != endpoint.apiKey) {
+                conn.setRequestProperty("Authorization", "Bearer " + endpoint.apiKey);
+            }
+            try (OutputStream out = conn.getOutputStream()) {
+                out.write(bodyBytes);
+            }
+
+            statusCode = conn.getResponseCode();
+            InputStream in = (200 <= statusCode && statusCode < 300) ? conn.getInputStream() : conn.getErrorStream();
+            responseBody = (null == in) ? "" : readAll(in);
+            conn.disconnect();
+        } catch (java.net.SocketTimeoutException e) {
+            throw new EndpointUnreachableException("Timed out waiting for " + endpoint.name + " at " + endpoint.url, e);
+        } catch (java.net.ConnectException | java.net.UnknownHostException | java.net.NoRouteToHostException
+                | javax.net.ssl.SSLException e) {
             throw new EndpointUnreachableException("Cannot reach " + endpoint.name + " at " + endpoint.url, e);
         }
         long elapsed = System.currentTimeMillis() - start;
-        if (500 <= resp.statusCode()) {
+
+        if (500 <= statusCode) {
             throw new EndpointUnreachableException("Chat completion failed on " + endpoint.name
-                    + ": HTTP " + resp.statusCode() + " " + resp.body());
+                    + ": HTTP " + statusCode + " " + responseBody);
         }
-        if (200 != resp.statusCode()) {
+        if (200 != statusCode) {
             throw new IOException("Chat completion failed on " + endpoint.name
-                    + ": HTTP " + resp.statusCode() + " " + resp.body());
+                    + ": HTTP " + statusCode + " " + responseBody);
         }
-        JsonNode root = MAPPER.readTree(resp.body());
+        JsonNode root = MAPPER.readTree(responseBody);
         JsonNode choices = root.get("choices");
         if (null == choices || 0 == choices.size()) {
-            throw new IOException("No choices in response from " + endpoint.name + ": " + resp.body());
+            throw new IOException("No choices in response from " + endpoint.name + ": " + responseBody);
         }
         String content = choices.get(0).get("message").get("content").asText();
         int completionTokens = 0;
@@ -136,5 +168,15 @@ final class LlamaClient {
             completionTokens = usage.get("completion_tokens").asInt();
         }
         return new Reply(content, completionTokens, elapsed, endpoint.name, model);
+    }
+
+    private static String readAll(InputStream in) throws IOException {
+        ByteArrayOutputStream buf = new ByteArrayOutputStream();
+        byte[] chunk = new byte[8192];
+        int n;
+        while (-1 != (n = in.read(chunk))) {
+            buf.write(chunk, 0, n);
+        }
+        return buf.toString(StandardCharsets.UTF_8);
     }
 }
