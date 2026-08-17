@@ -4,6 +4,7 @@
         "url": "http://predator:8081",
         "models": ["gemma-vision"],
         "costTier": "free",
+        "kind": "local",
         "vision": true
     },
     {
@@ -11,19 +12,30 @@
         "url": "http://victus:8081",
         "models": ["gemma-vision"],
         "costTier": "free",
+        "kind": "local",
         "vision": true
     },
     {
         "name": "legion-ollama",
         "url": "http://legion:11434",
         "models": ["mistral:latest"],
-        "costTier": "free"
+        "costTier": "free",
+        "kind": "local"
     },
     {
         "name": "openai-example",
         "url": "https://api.openai.com",
         "models": ["gpt-4o-mini"],
         "costTier": "cheap",
+        "kind": "remote",
         "apiKey": "sk-replace-me"
+    },
+    {
+        "name": "openrouter-example",
+        "url": "https://openrouter.ai/api",
+        "models": ["anthropic/claude-sonnet-5", "openai/gpt-5.2"],
+        "costTier": "expensive",
+        "kind": "remote",
+        "apiKey": "sk-or-replace-me"
     }
 ]

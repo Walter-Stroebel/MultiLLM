@@ -73,24 +73,29 @@ final class LlamaClient {
      */
     static Reply ask(Endpoint endpoint, String model, String prompt, boolean json)
             throws IOException, InterruptedException {
-        return ask(endpoint, model, prompt, json, null);
+        return ask(endpoint, model, prompt, json, null, null);
     }
 
     /**
      * Same as {@link #ask(Endpoint, String, String, boolean)}, but when
-     * {@code imageBase64} is non-null the message content becomes the
-     * OpenAI-compatible multimodal array (text part + a
-     * {@code data:image/png;base64,...} image_url part) instead of a
-     * plain string — the shape both llama-server's vision-capable
-     * gemma-vision alias and Ollama's OpenAI-compatible endpoint expect.
+     * {@code imageBase64} or {@code imageUrl} is non-null the message
+     * content becomes the OpenAI-compatible multimodal array (text part +
+     * an image_url part) instead of a plain string — the shape both
+     * llama-server's vision-capable gemma-vision alias and Ollama's
+     * OpenAI-compatible endpoint expect. At most one of the two image
+     * arguments should be set; a plain URL is preferred by callers that
+     * have one (e.g. the gateway's own {@code /v1/files/{id}} upload
+     * endpoint) so the backend fetches it itself instead of the caller
+     * paying base64's ~33% size inflation on top of round-tripping the
+     * bytes through this process.
      */
-    static Reply ask(Endpoint endpoint, String model, String prompt, boolean json, String imageBase64)
+    static Reply ask(Endpoint endpoint, String model, String prompt, boolean json, String imageBase64, String imageUrl)
             throws IOException, InterruptedException {
         ObjectNode body = MAPPER.createObjectNode();
         body.put("model", model);
         ObjectNode message = MAPPER.createObjectNode();
         message.put("role", "user");
-        if (null == imageBase64) {
+        if (null == imageBase64 && null == imageUrl) {
             message.put("content", prompt);
         } else {
             var content = message.putArray("content");
@@ -99,13 +104,14 @@ final class LlamaClient {
             textPart.put("text", prompt);
             ObjectNode imagePart = content.addObject();
             imagePart.put("type", "image_url");
-            imagePart.putObject("image_url").put("url", "data:image/png;base64," + imageBase64);
+            String url = null != imageUrl ? imageUrl : "data:image/png;base64," + imageBase64;
+            imagePart.putObject("image_url").put("url", url);
         }
         body.putArray("messages").add(message);
         if (json) {
             body.putObject("response_format").put("type", "json_object");
         }
-        if (null != imageBase64) {
+        if (null != imageBase64 || null != imageUrl) {
             // llama-server's default --slot-prompt-similarity (0.10) can route two
             // unrelated image requests to the same cached slot on as little as 10%
             // prompt-token overlap, reusing that slot's cached KV state built around

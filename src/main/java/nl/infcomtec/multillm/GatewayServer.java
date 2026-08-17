@@ -1,0 +1,154 @@
+/*
+ * Copyright (c) 2026 by Walter Stroebel and InfComTec.
+ */
+package nl.infcomtec.multillm;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpHandler;
+import com.sun.net.httpserver.HttpServer;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.Executors;
+
+/**
+ * The gateway itself: an OpenAI-compatible {@code /v1/chat/completions}
+ * endpoint backed by {@link RoutePlanner}, plus a small file-upload path
+ * ({@code /v1/files}) so a caller with no public web server can still
+ * hand a local llama-server/Ollama endpoint a real fetchable image URL
+ * instead of inlining base64 — see {@link FileStore}. Built on the JDK's
+ * own {@link HttpServer}; no new dependency for something this small.
+ */
+final class GatewayServer {
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    private final RoutePlanner planner;
+    private final FileStore fileStore = new FileStore();
+    private final String selfBaseUrl;
+    private final HttpServer server;
+
+    GatewayServer(List<Endpoint> endpoints, int port, String selfBaseUrl) throws IOException {
+        this.planner = new RoutePlanner(endpoints);
+        this.selfBaseUrl = selfBaseUrl;
+        this.server = HttpServer.create(new InetSocketAddress(port), 0);
+        server.createContext("/v1/chat/completions", new ChatHandler());
+        server.createContext("/v1/files", new FilesHandler());
+        server.setExecutor(Executors.newCachedThreadPool());
+    }
+
+    void start() {
+        server.start();
+    }
+
+    private final class ChatHandler implements HttpHandler {
+
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!"POST".equals(exchange.getRequestMethod())) {
+                sendError(exchange, 405, "Method not allowed");
+                return;
+            }
+            try {
+                JsonNode root = MAPPER.readTree(exchange.getRequestBody());
+                ChatRequest request = ChatRequest.parse(root);
+                LlamaClient.Reply reply = planner.route(request);
+                sendChatReply(exchange, reply);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                sendError(exchange, 503, "Interrupted");
+            } catch (IOException e) {
+                sendError(exchange, 502, e.getMessage());
+            }
+        }
+
+        private void sendChatReply(HttpExchange exchange, LlamaClient.Reply reply) throws IOException {
+            ObjectNode body = MAPPER.createObjectNode();
+            body.put("id", "gen-" + UUID.randomUUID());
+            body.put("object", "chat.completion");
+            body.put("created", System.currentTimeMillis() / 1000L);
+            body.put("model", reply.servedModel);
+            ObjectNode choice = body.putArray("choices").addObject();
+            choice.put("index", 0);
+            choice.put("finish_reason", "stop");
+            ObjectNode message = choice.putObject("message");
+            message.put("role", "assistant");
+            message.put("content", reply.content);
+            ObjectNode usage = body.putObject("usage");
+            usage.put("completion_tokens", reply.completionTokens);
+            body.put("served_by", reply.servedBy);
+
+            byte[] bytes = MAPPER.writeValueAsBytes(body);
+            exchange.getResponseHeaders().add("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, bytes.length);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write(bytes);
+            }
+        }
+    }
+
+    private final class FilesHandler implements HttpHandler {
+
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            String method = exchange.getRequestMethod();
+            String path = exchange.getRequestURI().getPath();
+            if ("PUT".equals(method) || "POST".equals(method)) {
+                handleUpload(exchange);
+            } else if ("GET".equals(method) && path.length() > "/v1/files/".length()) {
+                handleDownload(exchange, path.substring("/v1/files/".length()));
+            } else {
+                sendError(exchange, 405, "Method not allowed");
+            }
+        }
+
+        private void handleUpload(HttpExchange exchange) throws IOException {
+            String contentType = exchange.getRequestHeaders().getFirst("Content-Type");
+            if (null == contentType) {
+                contentType = "application/octet-stream";
+            }
+            byte[] bytes = exchange.getRequestBody().readAllBytes();
+            String id = fileStore.put(bytes, contentType);
+            String url = selfBaseUrl + "/v1/files/" + id;
+
+            ObjectNode body = MAPPER.createObjectNode();
+            body.put("id", id);
+            body.put("url", url);
+            byte[] responseBytes = MAPPER.writeValueAsBytes(body);
+            exchange.getResponseHeaders().add("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, responseBytes.length);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write(responseBytes);
+            }
+        }
+
+        private void handleDownload(HttpExchange exchange, String id) throws IOException {
+            byte[] bytes = fileStore.getBytes(id);
+            if (null == bytes) {
+                sendError(exchange, 404, "No such file");
+                return;
+            }
+            exchange.getResponseHeaders().add("Content-Type", fileStore.getContentType(id));
+            exchange.sendResponseHeaders(200, bytes.length);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write(bytes);
+            }
+        }
+    }
+
+    private static void sendError(HttpExchange exchange, int status, String message) throws IOException {
+        ObjectNode body = MAPPER.createObjectNode();
+        body.putObject("error").put("message", null == message ? "error" : message);
+        byte[] bytes = MAPPER.writeValueAsBytes(body);
+        exchange.getResponseHeaders().add("Content-Type", "application/json");
+        exchange.sendResponseHeaders(status, bytes.length);
+        try (OutputStream out = exchange.getResponseBody()) {
+            out.write(bytes);
+        }
+    }
+}

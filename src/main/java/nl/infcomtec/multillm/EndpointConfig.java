@@ -12,11 +12,14 @@ import java.util.List;
 
 /**
  * Loads the endpoint pool from a JSON config file. Deliberately dumb:
- * the file states only what a non-expert user already knows (name,
- * URL, which models are loaded, whether it can accept images, a coarse
- * free/cheap/expensive cost tier, and an optional API key) — nothing
- * measured or scored goes in this file, since that's the router's job
- * at runtime.
+ * the file states only what a non-expert user already knows (name, URL,
+ * which models are loaded, whether it's local or remote, whether it can
+ * accept images, a coarse free/cheap/expensive cost tier, and an optional
+ * API key) — nothing measured or scored goes in this file, since that's
+ * the route planner's job at request time. Models must be listed
+ * explicitly even for a pass-through gateway like OpenRouter — no
+ * wildcard, since that would let any request silently route to a paid
+ * model nobody approved spending on.
  */
 final class EndpointConfig {
 
@@ -40,7 +43,10 @@ final class EndpointConfig {
                     : CostTier.FREE;
             String apiKey = node.has("apiKey") ? node.get("apiKey").asText() : null;
             boolean vision = node.has("vision") && node.get("vision").asBoolean();
-            endpoints.add(new Endpoint(name, url, models, tier, apiKey, vision));
+            EndpointKind kind = node.has("kind")
+                    ? EndpointKind.valueOf(node.get("kind").asText().toUpperCase())
+                    : EndpointKind.REMOTE;
+            endpoints.add(new Endpoint(name, url, models, tier, apiKey, vision, kind));
         }
         return endpoints;
     }

@@ -9,7 +9,7 @@ import java.io.IOException;
  * The endpoint itself could not be reached — connection refused, timed
  * out, or returned a 5xx — as opposed to a malformed response or a
  * client-side error, which is a real bug worth surfacing rather than a
- * transient condition worth retrying elsewhere. {@link Router} catches
+ * transient condition worth retrying elsewhere. {@link RoutePlanner} catches
  * only this type to trigger cooldown-and-fallback.
  */
 final class EndpointUnreachableException extends IOException {
