@@ -208,17 +208,13 @@ commands by hand.
 
 ## Run as a system service
 
-A sample unit file is at `systemd/multillm.service` — install as a
-starting point, not a turnkey installer:
+A sample unit file is at `systemd/multillm.service`, matching the
+style already used for this machine's `llama-server` units (runs
+in-place from a repo checkout, no dedicated service user, no
+sandboxing directives — adjust paths/user for your own setup):
 
 ```bash
-sudo useradd --system --home-dir /opt/multillm --shell /usr/sbin/nologin multillm
-sudo mkdir -p /opt/multillm/config
-sudo cp target/MultiLLM-1.0.0-jar-with-dependencies.jar /opt/multillm/MultiLLM.jar
-sudo cp config/endpoints.json /opt/multillm/config/endpoints.json   # your real config, if any
-sudo chown -R multillm:multillm /opt/multillm
-sudo chmod 600 /opt/multillm/config/endpoints.json                 # may contain API keys
-
+mvn package
 sudo cp systemd/multillm.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now multillm
