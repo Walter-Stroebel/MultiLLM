@@ -66,6 +66,41 @@ final class RoutePlanner {
         throw null != lastFailure ? lastFailure : new IOException("No reachable endpoint for model " + request.model);
     }
 
+    /**
+     * Same candidate walk as {@link #route}, but for a streaming request:
+     * falls back to the next candidate only on a connection/status
+     * failure that happens before any response bytes exist to relay —
+     * exactly what {@link LlamaClient#askStreaming} guarantees by
+     * returning only after the backend's status line confirms success.
+     * Once this method returns, the caller is committed to that one
+     * endpoint for the rest of the stream.
+     */
+    LlamaClient.StreamingReply routeStreaming(ChatRequest request) throws IOException {
+        List<Endpoint> candidates = buildCandidates(request);
+        if (candidates.isEmpty()) {
+            throw new IOException("No endpoint available for model " + request.model);
+        }
+
+        IOException lastFailure = null;
+        for (Endpoint endpoint : candidates) {
+            if (endpoint.isCoolingDown()) {
+                continue;
+            }
+            String modelToUse = endpoint.modelToUse(request.requestedModel);
+            try {
+                return LlamaClient.askStreaming(endpoint, modelToUse, request.prompt, request.json,
+                        request.imageBase64, request.imageUrl);
+            } catch (EndpointUnreachableException e) {
+                endpoint.coolDown(UNREACHABLE_COOLDOWN_MILLIS);
+                lastFailure = e;
+                if (!request.allowFallbacks) {
+                    break;
+                }
+            }
+        }
+        throw null != lastFailure ? lastFailure : new IOException("No reachable endpoint for model " + request.model);
+    }
+
     private List<Endpoint> buildCandidates(ChatRequest request) {
         boolean needsImage = null != request.imageBase64 || null != request.imageUrl;
 

@@ -67,6 +67,27 @@ final class LlamaClient {
     }
 
     /**
+     * A backend connection whose response body is being streamed rather
+     * than buffered — the caller (the gateway's chat handler) copies raw
+     * bytes from {@code body} straight to the HTTP client as they arrive,
+     * so the backend's own SSE ({@code data: {...}\n\n} ... {@code data:
+     * [DONE]\n\n}) framing reaches the client unmodified. {@code body}
+     * must be closed by the caller once fully drained.
+     */
+    static final class StreamingReply {
+
+        final InputStream body;
+        final String servedBy;
+        final String servedModel;
+
+        StreamingReply(InputStream body, String servedBy, String servedModel) {
+            this.body = body;
+            this.servedBy = servedBy;
+            this.servedModel = servedModel;
+        }
+    }
+
+    /**
      * Sends one chat-completion request to the given endpoint for the
      * given model. Adds a bearer auth header only when the endpoint
      * declares an API key — local backends send none.
@@ -91,6 +112,107 @@ final class LlamaClient {
      */
     static Reply ask(Endpoint endpoint, String model, String prompt, boolean json, String imageBase64, String imageUrl)
             throws IOException, InterruptedException {
+        byte[] bodyBytes = buildRequestBody(model, prompt, json, false, imageBase64, imageUrl);
+
+        long start = System.currentTimeMillis();
+        String responseBody;
+        int statusCode;
+        try {
+            HttpURLConnection conn = openConnection(endpoint, bodyBytes);
+            statusCode = conn.getResponseCode();
+            InputStream in = (200 <= statusCode && statusCode < 300) ? conn.getInputStream() : conn.getErrorStream();
+            responseBody = (null == in) ? "" : readAll(in);
+            conn.disconnect();
+        } catch (java.net.SocketTimeoutException e) {
+            throw new EndpointUnreachableException("Timed out waiting for " + endpoint.name + " at " + endpoint.url, e);
+        } catch (java.net.ConnectException | java.net.UnknownHostException | java.net.NoRouteToHostException
+                | javax.net.ssl.SSLException e) {
+            throw new EndpointUnreachableException("Cannot reach " + endpoint.name + " at " + endpoint.url, e);
+        }
+        long elapsed = System.currentTimeMillis() - start;
+
+        checkStatus(endpoint, statusCode, responseBody);
+
+        JsonNode root = MAPPER.readTree(responseBody);
+        JsonNode choices = root.get("choices");
+        if (null == choices || 0 == choices.size()) {
+            throw new IOException("No choices in response from " + endpoint.name + ": " + responseBody);
+        }
+        String content = choices.get(0).get("message").get("content").asText();
+        int completionTokens = 0;
+        JsonNode usage = root.get("usage");
+        if (null != usage && usage.has("completion_tokens")) {
+            completionTokens = usage.get("completion_tokens").asInt();
+        }
+        return new Reply(content, completionTokens, elapsed, endpoint.name, model);
+    }
+
+    /**
+     * Same request shape as {@link #ask}, but with {@code stream: true} —
+     * returns as soon as the backend's status line/headers confirm
+     * success, without reading the body. The caller pumps
+     * {@link StreamingReply#body} straight through to its own HTTP
+     * client, so this is the last point at which a failure can still be
+     * handled by falling back to a different endpoint: once any response
+     * bytes have been relayed downstream, the client has already seen
+     * output attributed to this endpoint and switching would corrupt the
+     * stream.
+     */
+    static StreamingReply askStreaming(Endpoint endpoint, String model, String prompt, boolean json,
+            String imageBase64, String imageUrl) throws IOException {
+        byte[] bodyBytes = buildRequestBody(model, prompt, json, true, imageBase64, imageUrl);
+
+        int statusCode;
+        HttpURLConnection conn;
+        try {
+            conn = openConnection(endpoint, bodyBytes);
+            statusCode = conn.getResponseCode();
+        } catch (java.net.SocketTimeoutException e) {
+            throw new EndpointUnreachableException("Timed out waiting for " + endpoint.name + " at " + endpoint.url, e);
+        } catch (java.net.ConnectException | java.net.UnknownHostException | java.net.NoRouteToHostException
+                | javax.net.ssl.SSLException e) {
+            throw new EndpointUnreachableException("Cannot reach " + endpoint.name + " at " + endpoint.url, e);
+        }
+
+        if (200 != statusCode) {
+            InputStream errIn = conn.getErrorStream();
+            String responseBody = (null == errIn) ? "" : readAll(errIn);
+            conn.disconnect();
+            checkStatus(endpoint, statusCode, responseBody);
+        }
+        return new StreamingReply(conn.getInputStream(), endpoint.name, model);
+    }
+
+    private static void checkStatus(Endpoint endpoint, int statusCode, String responseBody) throws IOException {
+        if (500 <= statusCode) {
+            throw new EndpointUnreachableException("Chat completion failed on " + endpoint.name
+                    + ": HTTP " + statusCode + " " + responseBody);
+        }
+        if (200 != statusCode) {
+            throw new IOException("Chat completion failed on " + endpoint.name
+                    + ": HTTP " + statusCode + " " + responseBody);
+        }
+    }
+
+    private static HttpURLConnection openConnection(Endpoint endpoint, byte[] bodyBytes) throws IOException {
+        URI uri = URI.create(endpoint.url + "/v1/chat/completions");
+        HttpURLConnection conn = (HttpURLConnection) uri.toURL().openConnection();
+        conn.setRequestMethod("POST");
+        conn.setDoOutput(true);
+        conn.setConnectTimeout(CONNECT_TIMEOUT_MILLIS);
+        conn.setReadTimeout(READ_TIMEOUT_MILLIS);
+        conn.setRequestProperty("Content-Type", "application/json");
+        if (null != endpoint.apiKey) {
+            conn.setRequestProperty("Authorization", "Bearer " + endpoint.apiKey);
+        }
+        try (OutputStream out = conn.getOutputStream()) {
+            out.write(bodyBytes);
+        }
+        return conn;
+    }
+
+    private static byte[] buildRequestBody(String model, String prompt, boolean json, boolean stream,
+            String imageBase64, String imageUrl) throws IOException {
         ObjectNode body = MAPPER.createObjectNode();
         body.put("model", model);
         ObjectNode message = MAPPER.createObjectNode();
@@ -111,6 +233,9 @@ final class LlamaClient {
         if (json) {
             body.putObject("response_format").put("type", "json_object");
         }
+        if (stream) {
+            body.put("stream", true);
+        }
         if (null != imageBase64 || null != imageUrl) {
             // llama-server's default --slot-prompt-similarity (0.10) can route two
             // unrelated image requests to the same cached slot on as little as 10%
@@ -121,59 +246,7 @@ final class LlamaClient {
             // caching since they don't carry this correctness risk.
             body.put("cache_prompt", false);
         }
-        byte[] bodyBytes = MAPPER.writeValueAsString(body).getBytes(StandardCharsets.UTF_8);
-
-        URI uri = URI.create(endpoint.url + "/v1/chat/completions");
-
-        long start = System.currentTimeMillis();
-        String responseBody;
-        int statusCode;
-        try {
-            HttpURLConnection conn = (HttpURLConnection) uri.toURL().openConnection();
-            conn.setRequestMethod("POST");
-            conn.setDoOutput(true);
-            conn.setConnectTimeout(CONNECT_TIMEOUT_MILLIS);
-            conn.setReadTimeout(READ_TIMEOUT_MILLIS);
-            conn.setRequestProperty("Content-Type", "application/json");
-            if (null != endpoint.apiKey) {
-                conn.setRequestProperty("Authorization", "Bearer " + endpoint.apiKey);
-            }
-            try (OutputStream out = conn.getOutputStream()) {
-                out.write(bodyBytes);
-            }
-
-            statusCode = conn.getResponseCode();
-            InputStream in = (200 <= statusCode && statusCode < 300) ? conn.getInputStream() : conn.getErrorStream();
-            responseBody = (null == in) ? "" : readAll(in);
-            conn.disconnect();
-        } catch (java.net.SocketTimeoutException e) {
-            throw new EndpointUnreachableException("Timed out waiting for " + endpoint.name + " at " + endpoint.url, e);
-        } catch (java.net.ConnectException | java.net.UnknownHostException | java.net.NoRouteToHostException
-                | javax.net.ssl.SSLException e) {
-            throw new EndpointUnreachableException("Cannot reach " + endpoint.name + " at " + endpoint.url, e);
-        }
-        long elapsed = System.currentTimeMillis() - start;
-
-        if (500 <= statusCode) {
-            throw new EndpointUnreachableException("Chat completion failed on " + endpoint.name
-                    + ": HTTP " + statusCode + " " + responseBody);
-        }
-        if (200 != statusCode) {
-            throw new IOException("Chat completion failed on " + endpoint.name
-                    + ": HTTP " + statusCode + " " + responseBody);
-        }
-        JsonNode root = MAPPER.readTree(responseBody);
-        JsonNode choices = root.get("choices");
-        if (null == choices || 0 == choices.size()) {
-            throw new IOException("No choices in response from " + endpoint.name + ": " + responseBody);
-        }
-        String content = choices.get(0).get("message").get("content").asText();
-        int completionTokens = 0;
-        JsonNode usage = root.get("usage");
-        if (null != usage && usage.has("completion_tokens")) {
-            completionTokens = usage.get("completion_tokens").asInt();
-        }
-        return new Reply(content, completionTokens, elapsed, endpoint.name, model);
+        return MAPPER.writeValueAsString(body).getBytes(StandardCharsets.UTF_8);
     }
 
     private static String readAll(InputStream in) throws IOException {

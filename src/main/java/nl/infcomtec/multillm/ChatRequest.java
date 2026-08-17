@@ -35,6 +35,7 @@ final class ChatRequest {
     final String imageBase64;
     final String imageUrl;
     final boolean json;
+    final boolean stream;
 
     /** Explicit fallback model list from an OpenRouter-style {@code models} array; may be empty. */
     final List<String> fallbackModels;
@@ -43,7 +44,7 @@ final class ChatRequest {
     final List<String> providerIgnore;
     final boolean allowFallbacks;
 
-    ChatRequest(String model, String prompt, String imageBase64, String imageUrl, boolean json,
+    ChatRequest(String model, String prompt, String imageBase64, String imageUrl, boolean json, boolean stream,
             List<String> fallbackModels, List<String> providerOrder, List<String> providerIgnore,
             boolean allowFallbacks) {
         this.model = model;
@@ -54,6 +55,7 @@ final class ChatRequest {
         this.imageBase64 = imageBase64;
         this.imageUrl = imageUrl;
         this.json = json;
+        this.stream = stream;
         this.fallbackModels = fallbackModels;
         this.providerOrder = providerOrder;
         this.providerIgnore = providerIgnore;
@@ -100,6 +102,8 @@ final class ChatRequest {
         boolean json = root.has("response_format")
                 && "json_object".equals(root.get("response_format").path("type").asText());
 
+        boolean stream = root.has("stream") && root.get("stream").asBoolean();
+
         List<String> fallbackModels = new ArrayList<>();
         if (root.has("models") && root.get("models").isArray()) {
             for (JsonNode m : root.get("models")) {
@@ -127,7 +131,7 @@ final class ChatRequest {
             }
         }
 
-        return new ChatRequest(model, prompt, imageBase64, imageUrl, json,
+        return new ChatRequest(model, prompt, imageBase64, imageUrl, json, stream,
                 fallbackModels, providerOrder, providerIgnore, allowFallbacks);
     }
 }

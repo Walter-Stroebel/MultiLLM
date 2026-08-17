@@ -10,6 +10,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.util.List;
@@ -57,13 +58,39 @@ final class GatewayServer {
             try {
                 JsonNode root = MAPPER.readTree(exchange.getRequestBody());
                 ChatRequest request = ChatRequest.parse(root);
-                LlamaClient.Reply reply = planner.route(request);
-                sendChatReply(exchange, reply);
+                if (request.stream) {
+                    LlamaClient.StreamingReply reply = planner.routeStreaming(request);
+                    relayStream(exchange, reply);
+                } else {
+                    LlamaClient.Reply reply = planner.route(request);
+                    sendChatReply(exchange, reply);
+                }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 sendError(exchange, 503, "Interrupted");
             } catch (IOException e) {
                 sendError(exchange, 502, e.getMessage());
+            }
+        }
+
+        /**
+         * Copies the backend's own SSE bytes straight through to the
+         * client, unparsed — llama-server/Ollama already speak the exact
+         * {@code data: {...}\n\n ... data: [DONE]\n\n} framing an
+         * OpenAI-compatible streaming client expects, so there's nothing
+         * to translate.
+         */
+        private void relayStream(HttpExchange exchange, LlamaClient.StreamingReply reply) throws IOException {
+            exchange.getResponseHeaders().add("Content-Type", "text/event-stream");
+            exchange.getResponseHeaders().add("Cache-Control", "no-cache");
+            exchange.sendResponseHeaders(200, 0);
+            try (InputStream in = reply.body; OutputStream out = exchange.getResponseBody()) {
+                byte[] chunk = new byte[4096];
+                int n;
+                while (-1 != (n = in.read(chunk))) {
+                    out.write(chunk, 0, n);
+                    out.flush();
+                }
             }
         }
 
