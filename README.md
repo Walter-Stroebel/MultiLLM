@@ -1,10 +1,10 @@
 # MultiLLM
 
-A small, boring, load-bearing piece of infrastructure: a client-side
-router/load-balancer that sits in front of any number of
-OpenAI-compatible chat-completion endpoints — local (llama-server,
-Ollama, LM Studio, whatever) or remote — and picks the right one for
-each request.
+A small, boring, load-bearing piece of infrastructure: an
+OpenAI-compatible HTTP gateway that sits in front of any number of
+`/v1/chat/completions`-speaking backends — local (llama-server,
+Ollama, LM Studio, whatever) or remote/paid — and routes each request
+to the right one.
 
 ## The problem this solves
 
@@ -56,81 +56,64 @@ de-facto standard wire format regardless of who's actually serving the
 model — local llama.cpp, Ollama, LM Studio, or a paid cloud API all
 speak it. That means solving "route a request to the right endpoint"
 once, well, in one place, is enough. One JVM install, one jar, one
-config file — no per-project reinvention.
+config file, one gateway URL any OpenAI-compatible client can point
+at — no per-project reinvention.
 
 ## What it does
 
-- Reads a pool of endpoints from a config file: name, URL, which
-  model(s) each one serves, whether it can accept images, and a coarse
-  cost tier (`free` / `cheap` / `expensive`).
-- Runs a real work-queue/worker-pool: one dedicated thread per endpoint,
-  all pulling from a single shared queue. A worker takes its next item
-  the instant it's free — no per-worker assignment decision to get
-  wrong, no bookkeeping to keep fair. Throughput self-balances by real
-  completion speed: a fast box naturally does more work than a slow one
-  simply by finishing sooner and grabbing the next item, not because
-  anything measured or scored it as "faster."
-- Treats the requested model as a **preference, not a requirement**.
-  If nothing serving that model is free right now but another endpoint
-  is idle, the idle one answers using its own model instead of the
-  caller sitting behind a busy queue for no reason. The one hard
-  boundary this preference doesn't cross: an image-bearing request is
-  only ever handed to an endpoint that actually declares vision support.
-- Prefers **free** endpoints over `cheap`/`expensive` ones as a tier,
-  not a hard rule that can never fall through — `expensive` is only
-  ever reached when nothing free-and-local could serve the request at
-  all.
-- Falls back automatically if an endpoint is unreachable, and recovers
-  gracefully from a corrupted reply (a real llama.cpp quirk under
-  concurrent vision load — see `CLAUDE.md`) without ever freezing an
-  entire capability class or hanging a caller indefinitely.
+MultiLLM is an HTTP server (`GatewayServer`) exposing:
 
-Verified under real, sustained concurrent load: 228 requests (28 vision
-+ 200 text) fired against three real machines finished in ~2m15s,
-228/228 succeeded, GPU load spread almost perfectly evenly across all
-three (~32–34% share each, all sustained 80%+ utilization the whole
-run) — not because of a scoring formula, just because "whoever's free
-grabs the next job" is a self-balancing mechanism.
+- **`POST /v1/chat/completions`** — the standard OpenAI-compatible
+  endpoint, both buffered and `stream: true` (SSE passthrough,
+  unparsed — the backend's own framing reaches the client unmodified).
+- **`POST`/`PUT /v1/files`** + **`GET /v1/files/{id}`** — a small local
+  file store, so a caller with no public web server of its own can
+  still hand a backend a real fetchable image URL instead of inlining
+  base64.
 
-## Why concurrency changes the economics, not just the speed
+Requests are handled by `RoutePlanner`, which builds an ordered
+candidate list of configured endpoints and tries them in order, using
+OpenRouter's own routing vocabulary so any OpenRouter-aware client
+already knows how to steer it:
 
-The 228-request test above finished in ~2 minutes across three
-GPUs you already own. The same 228 calls, answered one at a time by a
-single hosted model, would take roughly 5x as long purely from lacking
-that concurrency — a single conversational stream cannot fork itself
-into three workers the way this router forks work across three real
-machines.
-
-The obvious rebuttal is "just run three hosted agent sessions in
-parallel, then" — but that doesn't actually get you the same trade.
-Each session re-pays its own fixed setup cost (system prompt, tool
-definitions, context bootstrapping) before producing a single useful
-token, so three parallel sessions burn roughly 3x the tokens of one
-sequential run doing the *same* total work, not the same total spend
-split three ways. And it's still not guaranteed to be faster in
-practice — hosted concurrency has its own tax: rate limits, queueing
-behind other tenants' traffic, orchestration overhead to fan the work
-out and reassemble it coherently. Three GPUs you own outright have none
-of that: no metering, no per-token toll, no other tenant to queue
-behind, and their economics only get *better* the more concurrent use
-you put through them, since the hardware is a sunk cost either way.
-That's not a trick this router is pulling — it's what the numbers look
-like once you're not renting compute by the token anymore.
+- A bare model name routes by policy: every endpoint that declares the
+  model, local (`kind: "local"`) endpoints tried before remote ones,
+  in config-declaration order — unless the request supplies its own
+  `provider.order` (list of endpoint names, tried first in that order)
+  or `provider.ignore` (names removed outright).
+- `models: [...]` (OpenRouter-style) supplies fallback model names to
+  also match against, if the primary model isn't served anywhere.
+  `provider.allow_fallbacks: false` truncates the candidate list to
+  just the first match — fail rather than try anyone else.
+- A `host/model`-prefixed model name (e.g. `"predator/gemma-vision"`)
+  is the sharp tool: it names exactly one configured endpoint by name,
+  bypassing policy entirely — "ask that box, not whichever one policy
+  would pick."
+- An image-bearing request (base64 or `image_url`) is a hard boundary:
+  only endpoints declaring `"vision": true` are ever candidates,
+  regardless of any other routing preference.
+- A connection failure (unreachable/timeout) cools that endpoint down
+  for 30s and falls through to the next candidate automatically — no
+  request fails just because one box is down, as long as another
+  candidate exists.
 
 ## What it deliberately doesn't do
 
 - No hidden spend, and no hidden exposure. `expensive` (and even
-  `cheap`) endpoints are only used because you configured them, and
-  only when nothing free-and-local could serve the model — MultiLLM
-  never sends a request off-box just because a remote endpoint happens
-  to answer faster. What leaves your network is entirely a choice you
-  made in the config file, not a default you have to notice and turn off.
+  `cheap`) endpoints are only ever tried because you configured and
+  ordered them that way — MultiLLM never sends a request off-box
+  because a remote endpoint happens to answer faster. What leaves your
+  network is entirely a choice you made in the config file.
+- No conversation history. Every call is one-shot and stateless — only
+  the last message's content is read; multi-turn `messages` history is
+  deliberately not reconstructed server-side.
 - No hardware benchmarking, no GPU introspection, no scoring formula
-  for you to tune. The config file states only what you already know
-  (what's running where); MultiLLM measures the rest itself from
-  ordinary traffic.
+  to tune. The config file states only what you already know (what's
+  running where, what it can do); routing is a plain deterministic
+  candidate walk, not a measured decision.
 - No cloud dependency of any kind required to use this at all — a
-  single local endpoint in the config file is a completely valid setup.
+  single local endpoint in the config file is a completely valid
+  setup.
 
 ## Requirements
 
@@ -165,6 +148,7 @@ cp config/endpoints.example.json config/endpoints.json
         "url": "http://predator:8081",
         "models": ["gemma-vision"],
         "costTier": "free",
+        "kind": "local",
         "vision": true
     },
     {
@@ -172,10 +156,16 @@ cp config/endpoints.example.json config/endpoints.json
         "url": "https://api.openai.com",
         "models": ["gpt-4o-mini"],
         "costTier": "cheap",
+        "kind": "remote",
         "apiKey": "sk-replace-me"
     }
 ]
 ```
+
+Every model an endpoint can be asked for must be listed explicitly,
+even for a pass-through gateway like OpenRouter — no wildcard, since
+that would let any request silently route to a paid model nobody
+approved spending on.
 
 `config/endpoints.json` is gitignored on purpose — it's the one file
 likely to contain a real API key. Only `endpoints.example.json` (dummy
@@ -185,32 +175,47 @@ falls back to the example file so the jar still runs out of the box.
 ## Run
 
 ```bash
-java -jar target/MultiLLM-1.0-jar-with-dependencies.jar <model> <prompt...>
+java -jar target/MultiLLM-1.0-jar-with-dependencies.jar [port]
 ```
 
-Example:
+Defaults to port 8085. Starts the gateway and prints its self URL
+(used for the `/v1/files` upload response) and how many endpoints it
+loaded.
 
 ```bash
-java -jar target/MultiLLM-1.0-jar-with-dependencies.jar gemma-vision "say hi in five words"
+java -jar target/MultiLLM-1.0-jar-with-dependencies.jar
 ```
-
 ```
 Loaded 3 endpoint(s) from config/endpoints.json
-[served by victus, model gemma-vision] Hello there, how are you?
+MultiLLM gateway listening on port 8085 (self URL http://legion:8085)
 ```
 
-MultiLLM loads the config, queues the request, and prints which
-endpoint actually answered and with which model — useful for seeing
-the preference-vs-substitution behavior in action.
+Then point any OpenAI-compatible client at it:
+
+```bash
+curl -s http://localhost:8085/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemma-vision","messages":[{"role":"user","content":"say hi in five words"}]}'
+```
+
+The response's `served_by` field (and `X-Served-By` header on
+streamed responses) names whichever endpoint actually answered — handy
+for watching the policy-vs-pinned-host routing decision in action.
+
+A minimal Swing GUI (`DebugClient`) is also available for interactive
+testing against a running gateway, if you'd rather not shell out curl
+commands by hand.
 
 ## Status
 
-The routing core (single shared work queue, model-as-preference,
-vision as a hard capability boundary, cooldown/retry on failure) is
-implemented and verified under real sustained concurrent load — see
-the 228-request stress test result above. Still a foundation to build
-on, not a finished product: no streaming, no conversation history (by
-design — each call is a stateless "ant"), and the CLI is single-prompt
-in/single-reply out. See `CLAUDE.md` for architecture notes,
-conventions, and a documented upstream llama-server quirk if you're
-extending it.
+The gateway core — OpenAI-compatible `/v1/chat/completions` (buffered
+and streaming), `/v1/files` upload/download, OpenRouter-style
+candidate routing (host-pinning, provider.order/ignore/allow_fallbacks,
+vision as a hard capability boundary, cooldown/retry on connection
+failure) — is implemented and load-tested clean to 64 concurrent
+requests against a real llama-server backend with zero failures.
+Concurrency limiting is intentionally left to each backend (e.g.
+llama-server's own slot count); MultiLLM's job is routing and
+failover, not admission control. See `CLAUDE.md` for architecture
+notes, conventions, and a documented upstream llama-server quirk if
+you're extending it.
