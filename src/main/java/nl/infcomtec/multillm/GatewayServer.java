@@ -83,6 +83,11 @@ final class GatewayServer {
         private void relayStream(HttpExchange exchange, LlamaClient.StreamingReply reply) throws IOException {
             exchange.getResponseHeaders().add("Content-Type", "text/event-stream");
             exchange.getResponseHeaders().add("Cache-Control", "no-cache");
+            // Not part of any OpenAI-compatible client's expectations — this gateway's
+            // own extension so a caller can tell which endpoint answered a streamed
+            // request, since that information isn't otherwise present in the raw SSE
+            // passthrough the way it is in the buffered response's served_by field.
+            exchange.getResponseHeaders().add("X-Served-By", reply.servedBy);
             exchange.sendResponseHeaders(200, 0);
             try (InputStream in = reply.body; OutputStream out = exchange.getResponseBody()) {
                 byte[] chunk = new byte[4096];
