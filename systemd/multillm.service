@@ -1,0 +1,24 @@
+[Unit]
+Description=MultiLLM OpenAI-compatible LLM gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=multillm
+Group=multillm
+WorkingDirectory=/opt/multillm
+ExecStart=/usr/bin/java -jar /opt/multillm/MultiLLM.jar 8085
+Restart=on-failure
+RestartSec=5
+
+# Config file (config/endpoints.json, may contain API keys) is read
+# relative to WorkingDirectory - keep it out of version control and
+# owned by the multillm user, mode 600.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/multillm
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

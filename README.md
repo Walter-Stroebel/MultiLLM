@@ -206,6 +206,24 @@ A minimal Swing GUI (`DebugClient`) is also available for interactive
 testing against a running gateway, if you'd rather not shell out curl
 commands by hand.
 
+## Run as a system service
+
+A sample unit file is at `systemd/multillm.service` — install as a
+starting point, not a turnkey installer:
+
+```bash
+sudo useradd --system --home-dir /opt/multillm --shell /usr/sbin/nologin multillm
+sudo mkdir -p /opt/multillm/config
+sudo cp target/MultiLLM-1.0.0-jar-with-dependencies.jar /opt/multillm/MultiLLM.jar
+sudo cp config/endpoints.json /opt/multillm/config/endpoints.json   # your real config, if any
+sudo chown -R multillm:multillm /opt/multillm
+sudo chmod 600 /opt/multillm/config/endpoints.json                 # may contain API keys
+
+sudo cp systemd/multillm.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now multillm
+```
+
 ## Status
 
 The gateway core — OpenAI-compatible `/v1/chat/completions` (buffered
