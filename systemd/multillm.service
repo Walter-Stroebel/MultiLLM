@@ -4,8 +4,8 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/walter/github/MultiLLM
-ExecStart=/usr/bin/java -jar /home/walter/github/MultiLLM/target/MultiLLM-1.0.0-jar-with-dependencies.jar 8085
+WorkingDirectory=/usr/local/lib/multillm
+ExecStart=/usr/bin/java -jar /usr/local/lib/multillm/MultiLLM.jar 8085
 Restart=on-failure
 RestartSec=5
 

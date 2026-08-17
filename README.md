@@ -209,16 +209,31 @@ commands by hand.
 ## Run as a system service
 
 A sample unit file is at `systemd/multillm.service`, matching the
-style already used for this machine's `llama-server` units (runs
-in-place from a repo checkout, no dedicated service user, no
-sandboxing directives — adjust paths/user for your own setup):
+style already used for this machine's `llama-server` units: no
+dedicated service user, no sandboxing directives. Unlike those units,
+though, it does **not** run out of a repo checkout under a user's home
+directory — the unit runs as root (no `User=` set), so `ExecStart`
+must point at a jar and config that a non-root user cannot overwrite,
+or any local account can hand itself root on the next service
+restart. Install the built jar and config to a root-owned system
+path instead:
 
 ```bash
 mvn package
+sudo mkdir -p /usr/local/lib/multillm/config
+sudo cp target/MultiLLM-1.0.0-jar-with-dependencies.jar /usr/local/lib/multillm/MultiLLM.jar
+sudo cp config/endpoints.json /usr/local/lib/multillm/config/endpoints.json   # your real config, if any
+sudo chown -R root:root /usr/local/lib/multillm
+sudo chmod 600 /usr/local/lib/multillm/config/endpoints.json                 # may contain API keys
+
 sudo cp systemd/multillm.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now multillm
 ```
+
+Re-run the `cp`/`chown` steps (or a small deploy script) after every
+rebuild — the unit intentionally never points at anything under a
+user's home directory or git working tree.
 
 ## Status
 
