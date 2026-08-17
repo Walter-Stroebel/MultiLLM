@@ -31,9 +31,11 @@ demonstrably carried a correct, unique image. Ruled out along the way:
 
 - Oversized/corrupt image files — all test images work perfectly
   sent single-shot, no concurrency.
-- MultiLLM's own concurrency handling — `Endpoint`'s single-flight
-  semaphore was confirmed via live `/slots` polling to never allow more
-  than one in-flight request per endpoint from MultiLLM's traffic.
+- MultiLLM's own concurrency handling — at the time, `Endpoint`'s
+  single-flight semaphore was confirmed via live `/slots` polling to
+  never allow more than one in-flight request per endpoint from
+  MultiLLM's traffic. (That semaphore no longer exists post-rewrite —
+  see note below.)
 - Mixing vision (predator/victus) and text (legion/Ollama) traffic in
   the same batch — reproduces with vision-only traffic too.
 - `--slot-prompt-similarity` LCP-based slot cache reuse (llama-server's
@@ -54,6 +56,20 @@ is the general posture for OpenAI-compatible-spec gaps and
 backend-specific quirks generally: work around them at the router
 level with detection and retry, don't chase every backend's individual
 bugs upstream. There will always be another one.
+
+**Note (post-rewrite, current architecture)**: the shared-queue
+`Router` described above was replaced by `RoutePlanner` +
+`GatewayServer` (an OpenAI-compatible HTTP gateway on the JDK's
+built-in `HttpServer`, one thread per request via a cached thread
+pool). There is no queue and no per-endpoint concurrency cap anymore —
+`Endpoint` carries no semaphore, only `cooldownUntilMillis` for
+failure-triggered cooldown. Concurrency limiting for local backends is
+left entirely to llama-server's own slot count; MultiLLM only picks a
+candidate endpoint order and falls through on connectivity failure via
+`EndpointUnreachableException`, it doesn't throttle admission. Any
+`looksLikeMissingImage`-style detection living on today's code path
+would need to be re-verified against the current `LlamaClient`/
+`RoutePlanner`, not assumed carried over from the old `Router`.
 
 ## Java Style
 General idiom (no lambdas/method references, threading defaults, no Spring,
