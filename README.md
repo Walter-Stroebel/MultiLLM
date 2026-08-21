@@ -106,7 +106,10 @@ already knows how to steer it:
   network is entirely a choice you made in the config file.
 - No conversation history. Every call is one-shot and stateless — only
   the last message's content is read; multi-turn `messages` history is
-  deliberately not reconstructed server-side.
+  deliberately not reconstructed server-side. The one exception is a
+  leading `system`-role message, which is preserved and forwarded
+  separately (needed for OpenAI-style clients that send a system+user
+  pair, e.g. agentic tool-calling clients).
 - No hardware benchmarking, no GPU introspection, no scoring formula
   to tune. The config file states only what you already know (what's
   running where, what it can do); routing is a plain deterministic
