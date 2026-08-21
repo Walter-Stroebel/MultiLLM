@@ -94,7 +94,7 @@ final class LlamaClient {
      */
     static Reply ask(Endpoint endpoint, String model, String prompt, boolean json)
             throws IOException, InterruptedException {
-        return ask(endpoint, model, prompt, json, null, null);
+        return ask(endpoint, model, prompt, null, json, null, null);
     }
 
     /**
@@ -110,9 +110,9 @@ final class LlamaClient {
      * paying base64's ~33% size inflation on top of round-tripping the
      * bytes through this process.
      */
-    static Reply ask(Endpoint endpoint, String model, String prompt, boolean json, String imageBase64, String imageUrl)
-            throws IOException, InterruptedException {
-        byte[] bodyBytes = buildRequestBody(model, prompt, json, false, imageBase64, imageUrl);
+    static Reply ask(Endpoint endpoint, String model, String prompt, String systemPrompt, boolean json,
+            String imageBase64, String imageUrl) throws IOException, InterruptedException {
+        byte[] bodyBytes = buildRequestBody(model, prompt, systemPrompt, json, false, imageBase64, imageUrl);
 
         long start = System.currentTimeMillis();
         String responseBody;
@@ -158,9 +158,9 @@ final class LlamaClient {
      * output attributed to this endpoint and switching would corrupt the
      * stream.
      */
-    static StreamingReply askStreaming(Endpoint endpoint, String model, String prompt, boolean json,
-            String imageBase64, String imageUrl) throws IOException {
-        byte[] bodyBytes = buildRequestBody(model, prompt, json, true, imageBase64, imageUrl);
+    static StreamingReply askStreaming(Endpoint endpoint, String model, String prompt, String systemPrompt,
+            boolean json, String imageBase64, String imageUrl) throws IOException {
+        byte[] bodyBytes = buildRequestBody(model, prompt, systemPrompt, json, true, imageBase64, imageUrl);
 
         int statusCode;
         HttpURLConnection conn;
@@ -211,11 +211,17 @@ final class LlamaClient {
         return conn;
     }
 
-    private static byte[] buildRequestBody(String model, String prompt, boolean json, boolean stream,
-            String imageBase64, String imageUrl) throws IOException {
+    private static byte[] buildRequestBody(String model, String prompt, String systemPrompt, boolean json,
+            boolean stream, String imageBase64, String imageUrl) throws IOException {
         ObjectNode body = MAPPER.createObjectNode();
         body.put("model", model);
-        ObjectNode message = MAPPER.createObjectNode();
+        var messages = body.putArray("messages");
+        if (null != systemPrompt && !systemPrompt.isEmpty()) {
+            ObjectNode systemMessage = messages.addObject();
+            systemMessage.put("role", "system");
+            systemMessage.put("content", systemPrompt);
+        }
+        ObjectNode message = messages.addObject();
         message.put("role", "user");
         if (null == imageBase64 && null == imageUrl) {
             message.put("content", prompt);
@@ -229,7 +235,6 @@ final class LlamaClient {
             String url = null != imageUrl ? imageUrl : "data:image/png;base64," + imageBase64;
             imagePart.putObject("image_url").put("url", url);
         }
-        body.putArray("messages").add(message);
         if (json) {
             body.putObject("response_format").put("type", "json_object");
         }

@@ -53,7 +53,7 @@ final class RoutePlanner {
             }
             String modelToUse = endpoint.modelToUse(request.requestedModel);
             try {
-                return LlamaClient.ask(endpoint, modelToUse, request.prompt, request.json,
+                return LlamaClient.ask(endpoint, modelToUse, request.prompt, request.systemPrompt, request.json,
                         request.imageBase64, request.imageUrl);
             } catch (EndpointUnreachableException e) {
                 endpoint.coolDown(UNREACHABLE_COOLDOWN_MILLIS);
@@ -88,8 +88,8 @@ final class RoutePlanner {
             }
             String modelToUse = endpoint.modelToUse(request.requestedModel);
             try {
-                return LlamaClient.askStreaming(endpoint, modelToUse, request.prompt, request.json,
-                        request.imageBase64, request.imageUrl);
+                return LlamaClient.askStreaming(endpoint, modelToUse, request.prompt, request.systemPrompt,
+                        request.json, request.imageBase64, request.imageUrl);
             } catch (EndpointUnreachableException e) {
                 endpoint.coolDown(UNREACHABLE_COOLDOWN_MILLIS);
                 lastFailure = e;

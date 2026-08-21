@@ -16,7 +16,11 @@ import java.util.List;
  * {@link RoutePlanner} reads to decide candidate order. Only single-turn
  * text(+image) prompts are supported — matching {@link LlamaClient}'s
  * one-shot, stateless call shape; multi-message conversation history in
- * {@code messages} is deliberately not reconstructed.
+ * {@code messages} is deliberately not reconstructed, with one exception:
+ * a leading {@code system}-role message is preserved separately (see
+ * {@link #systemPrompt}) and forwarded as a real {@code system} message,
+ * since dropping it silently breaks any client that sends system+user
+ * (the normal shape for agentic tool-calling clients).
  * <p>
  * {@code model} may optionally carry a {@code host/model} prefix (e.g.
  * {@code "predator/gemma-vision"}) naming a specific configured
@@ -32,6 +36,7 @@ final class ChatRequest {
     final String requestedHost;
     final String requestedModel;
     final String prompt;
+    final String systemPrompt;
     final String imageBase64;
     final String imageUrl;
     final boolean json;
@@ -44,14 +49,15 @@ final class ChatRequest {
     final List<String> providerIgnore;
     final boolean allowFallbacks;
 
-    ChatRequest(String model, String prompt, String imageBase64, String imageUrl, boolean json, boolean stream,
-            List<String> fallbackModels, List<String> providerOrder, List<String> providerIgnore,
+    ChatRequest(String model, String prompt, String systemPrompt, String imageBase64, String imageUrl, boolean json,
+            boolean stream, List<String> fallbackModels, List<String> providerOrder, List<String> providerIgnore,
             boolean allowFallbacks) {
         this.model = model;
         int slash = null == model ? -1 : model.indexOf('/');
         this.requestedHost = slash < 0 ? null : model.substring(0, slash);
         this.requestedModel = slash < 0 ? model : model.substring(slash + 1);
         this.prompt = prompt;
+        this.systemPrompt = systemPrompt;
         this.imageBase64 = imageBase64;
         this.imageUrl = imageUrl;
         this.json = json;
@@ -66,10 +72,20 @@ final class ChatRequest {
         String model = root.has("model") ? root.get("model").asText() : null;
 
         String prompt = "";
+        String systemPrompt = null;
         String imageBase64 = null;
         String imageUrl = null;
         JsonNode messages = root.get("messages");
         if (null != messages && messages.isArray() && messages.size() > 0) {
+            for (JsonNode m : messages) {
+                if ("system".equals(m.path("role").asText())) {
+                    JsonNode sc = m.get("content");
+                    if (null != sc && sc.isTextual()) {
+                        systemPrompt = sc.asText();
+                    }
+                    break;
+                }
+            }
             JsonNode last = messages.get(messages.size() - 1);
             JsonNode content = last.get("content");
             if (null != content) {
@@ -131,7 +147,7 @@ final class ChatRequest {
             }
         }
 
-        return new ChatRequest(model, prompt, imageBase64, imageUrl, json, stream,
+        return new ChatRequest(model, prompt, systemPrompt, imageBase64, imageUrl, json, stream,
                 fallbackModels, providerOrder, providerIgnore, allowFallbacks);
     }
 }
