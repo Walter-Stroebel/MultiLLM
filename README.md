@@ -59,184 +59,14 @@ once, well, in one place, is enough. One JVM install, one jar, one
 config file, one gateway URL any OpenAI-compatible client can point
 at — no per-project reinvention.
 
-## What it does
+## Get started
 
-MultiLLM is an HTTP server (`GatewayServer`) exposing:
-
-- **`POST /v1/chat/completions`** — the standard OpenAI-compatible
-  endpoint, both buffered and `stream: true` (SSE passthrough,
-  unparsed — the backend's own framing reaches the client unmodified).
-- **`POST`/`PUT /v1/files`** + **`GET /v1/files/{id}`** — a small local
-  file store, so a caller with no public web server of its own can
-  still hand a backend a real fetchable image URL instead of inlining
-  base64.
-
-Requests are handled by `RoutePlanner`, which builds an ordered
-candidate list of configured endpoints and tries them in order, using
-OpenRouter's own routing vocabulary so any OpenRouter-aware client
-already knows how to steer it:
-
-- A bare model name routes by policy: every endpoint that declares the
-  model, local (`kind: "local"`) endpoints tried before remote ones,
-  in config-declaration order — unless the request supplies its own
-  `provider.order` (list of endpoint names, tried first in that order)
-  or `provider.ignore` (names removed outright).
-- `models: [...]` (OpenRouter-style) supplies fallback model names to
-  also match against, if the primary model isn't served anywhere.
-  `provider.allow_fallbacks: false` truncates the candidate list to
-  just the first match — fail rather than try anyone else.
-- A `host/model`-prefixed model name (e.g. `"predator/gemma-vision"`)
-  is the sharp tool: it names exactly one configured endpoint by name,
-  bypassing policy entirely — "ask that box, not whichever one policy
-  would pick."
-- An image-bearing request (base64 or `image_url`) is a hard boundary:
-  only endpoints declaring `"vision": true` are ever candidates,
-  regardless of any other routing preference.
-- A connection failure (unreachable/timeout) cools that endpoint down
-  for 30s and falls through to the next candidate automatically — no
-  request fails just because one box is down, as long as another
-  candidate exists.
-
-## What it deliberately doesn't do
-
-- No hidden spend, and no hidden exposure. `expensive` (and even
-  `cheap`) endpoints are only ever tried because you configured and
-  ordered them that way — MultiLLM never sends a request off-box
-  because a remote endpoint happens to answer faster. What leaves your
-  network is entirely a choice you made in the config file.
-- No conversation history. Every call is one-shot and stateless — only
-  the last message's content is read; multi-turn `messages` history is
-  deliberately not reconstructed server-side. The one exception is a
-  leading `system`-role message, which is preserved and forwarded
-  separately (needed for OpenAI-style clients that send a system+user
-  pair, e.g. agentic tool-calling clients).
-- No hardware benchmarking, no GPU introspection, no scoring formula
-  to tune. The config file states only what you already know (what's
-  running where, what it can do); routing is a plain deterministic
-  candidate walk, not a measured decision.
-- No cloud dependency of any kind required to use this at all — a
-  single local endpoint in the config file is a completely valid
-  setup.
-
-## Requirements
-
-- A JVM (OpenJDK 17+). That's the entire runtime dependency for
-  consumers of the built jar.
-- At least one endpoint somewhere that speaks the OpenAI-compatible
-  `/v1/chat/completions` API — e.g. `llama-server`, Ollama (which
-  exposes this alongside its native API), LM Studio, or a paid
-  provider if you choose to configure one.
-
-## Build
-
-```bash
-mvn package
-```
-
-Produces `target/MultiLLM-1.0-jar-with-dependencies.jar` — a single
-self-contained jar, nothing else to install.
-
-## Configure
-
-Copy the example and edit it:
-
-```bash
-cp config/endpoints.example.json config/endpoints.json
-```
-
-```json
-[
-    {
-        "name": "predator",
-        "url": "http://predator:8081",
-        "models": ["gemma-vision"],
-        "costTier": "free",
-        "kind": "local",
-        "vision": true
-    },
-    {
-        "name": "openai-example",
-        "url": "https://api.openai.com",
-        "models": ["gpt-4o-mini"],
-        "costTier": "cheap",
-        "kind": "remote",
-        "apiKey": "sk-replace-me"
-    }
-]
-```
-
-Every model an endpoint can be asked for must be listed explicitly,
-even for a pass-through gateway like OpenRouter — no wildcard, since
-that would let any request silently route to a paid model nobody
-approved spending on.
-
-`config/endpoints.json` is gitignored on purpose — it's the one file
-likely to contain a real API key. Only `endpoints.example.json` (dummy
-values) is tracked. If no `config/endpoints.json` exists, MultiLLM
-falls back to the example file so the jar still runs out of the box.
-
-## Run
-
-```bash
-java -jar target/MultiLLM-1.0-jar-with-dependencies.jar [port]
-```
-
-Defaults to port 8085. Starts the gateway and prints its self URL
-(used for the `/v1/files` upload response) and how many endpoints it
-loaded.
-
-```bash
-java -jar target/MultiLLM-1.0-jar-with-dependencies.jar
-```
-```
-Loaded 3 endpoint(s) from config/endpoints.json
-MultiLLM gateway listening on port 8085 (self URL http://legion:8085)
-```
-
-Then point any OpenAI-compatible client at it:
-
-```bash
-curl -s http://localhost:8085/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"gemma-vision","messages":[{"role":"user","content":"say hi in five words"}]}'
-```
-
-The response's `served_by` field (and `X-Served-By` header on
-streamed responses) names whichever endpoint actually answered — handy
-for watching the policy-vs-pinned-host routing decision in action.
-
-A minimal Swing GUI (`DebugClient`) is also available for interactive
-testing against a running gateway, if you'd rather not shell out curl
-commands by hand.
-
-## Run as a system service
-
-A sample unit file is at `systemd/multillm.service`, matching the
-style already used for this machine's `llama-server` units: no
-dedicated service user, no sandboxing directives. Unlike those units,
-though, it does **not** run out of a repo checkout under a user's home
-directory — the unit runs as root (no `User=` set), so `ExecStart`
-must point at a jar and config that a non-root user cannot overwrite,
-or any local account can hand itself root on the next service
-restart. Install the built jar and config to a root-owned system
-path instead:
-
-```bash
-mvn package
-sudo mkdir -p /usr/local/lib/multillm/config
-sudo cp target/MultiLLM-1.0.0-jar-with-dependencies.jar /usr/local/lib/multillm/MultiLLM.jar
-sudo cp config/endpoints.json /usr/local/lib/multillm/config/endpoints.json   # your real config, if any
-sudo chown -R root:root /usr/local/lib/multillm
-sudo chmod 600 /usr/local/lib/multillm/config/endpoints.json                 # may contain API keys
-
-sudo cp systemd/multillm.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now multillm
-```
-
-Re-run the `cp`/`chown` steps (or a small deploy script) after every
-rebuild — the unit intentionally never points at anything under a
-user's home directory or git working tree.
+- **`INSTALL.md`** — requirements, build, configure, run, run as a
+  system service.
+- **`MANUAL.md`** — routing behavior, endpoint reference, and the
+  local-sampling-parameter experiments (personas, `/v1/think`).
+- **`CLAUDE.md`** — architecture notes and conventions, for anyone
+  extending the code.
 
 ## Status
 
@@ -248,6 +78,4 @@ failure) — is implemented and load-tested clean to 64 concurrent
 requests against a real llama-server backend with zero failures.
 Concurrency limiting is intentionally left to each backend (e.g.
 llama-server's own slot count); MultiLLM's job is routing and
-failover, not admission control. See `CLAUDE.md` for architecture
-notes, conventions, and a documented upstream llama-server quirk if
-you're extending it.
+failover, not admission control.
