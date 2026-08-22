@@ -1,0 +1,18 @@
+[
+    {
+        "name": "drunk-gemma4",
+        "hostEndpoint": "predator",
+        "model": "gemma-vision",
+        "temperature": 4.0,
+        "topP": 0.98,
+        "topK": 300,
+        "minP": 0.001,
+        "repeatPenalty": 1.05
+    },
+    {
+        "name": "sober-gemma4",
+        "hostEndpoint": "predator",
+        "model": "gemma-vision",
+        "temperature": 0.2
+    }
+]

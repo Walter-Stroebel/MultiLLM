@@ -6,6 +6,7 @@ package nl.infcomtec.multillm;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Builds an ordered candidate endpoint list for one request and tries
@@ -29,18 +30,30 @@ import java.util.List;
  * {@code provider.allow_fallbacks == false} truncates the list to just
  * the first candidate — try it, and if it fails, fail the request rather
  * than trying anyone else.
+ * <p>
+ * A {@code requestedModel} that names a configured {@link Persona} (e.g.
+ * {@code "drunk-gemma4"}) is resolved before any of the above: it names
+ * one exact endpoint+model, like {@code host/model} addressing, plus a
+ * fixed {@link SamplingOverride} applied to that one request.
  */
 final class RoutePlanner {
 
     private static final long UNREACHABLE_COOLDOWN_MILLIS = 30_000L;
 
     private final List<Endpoint> endpoints;
+    private final Map<String, Persona> personas;
 
-    RoutePlanner(List<Endpoint> endpoints) {
+    RoutePlanner(List<Endpoint> endpoints, Map<String, Persona> personas) {
         this.endpoints = endpoints;
+        this.personas = personas;
     }
 
     LlamaClient.Reply route(ChatRequest request) throws IOException, InterruptedException {
+        Persona persona = personas.get(request.requestedModel);
+        if (null != persona) {
+            return routePersona(persona, request);
+        }
+
         List<Endpoint> candidates = buildCandidates(request);
         if (candidates.isEmpty()) {
             throw new IOException("No endpoint available for model " + request.model);
@@ -54,7 +67,7 @@ final class RoutePlanner {
             String modelToUse = endpoint.modelToUse(request.requestedModel);
             try {
                 return LlamaClient.ask(endpoint, modelToUse, request.prompt, request.systemPrompt, request.json,
-                        request.imageBase64, request.imageUrl);
+                        request.imageBase64, request.imageUrl, null);
             } catch (EndpointUnreachableException e) {
                 endpoint.coolDown(UNREACHABLE_COOLDOWN_MILLIS);
                 lastFailure = e;
@@ -64,6 +77,24 @@ final class RoutePlanner {
             }
         }
         throw null != lastFailure ? lastFailure : new IOException("No reachable endpoint for model " + request.model);
+    }
+
+    private LlamaClient.Reply routePersona(Persona persona, ChatRequest request) throws IOException, InterruptedException {
+        Endpoint endpoint = findEndpoint(persona.hostEndpoint);
+        if (null == endpoint) {
+            throw new IOException("Persona " + persona.name + " names unknown endpoint " + persona.hostEndpoint);
+        }
+        return LlamaClient.ask(endpoint, persona.model, request.prompt, request.systemPrompt, request.json,
+                request.imageBase64, request.imageUrl, persona.sampling);
+    }
+
+    private Endpoint findEndpoint(String name) {
+        for (Endpoint e : endpoints) {
+            if (e.name.equals(name)) {
+                return e;
+            }
+        }
+        return null;
     }
 
     /**
@@ -76,6 +107,16 @@ final class RoutePlanner {
      * endpoint for the rest of the stream.
      */
     LlamaClient.StreamingReply routeStreaming(ChatRequest request) throws IOException {
+        Persona persona = personas.get(request.requestedModel);
+        if (null != persona) {
+            Endpoint endpoint = findEndpoint(persona.hostEndpoint);
+            if (null == endpoint) {
+                throw new IOException("Persona " + persona.name + " names unknown endpoint " + persona.hostEndpoint);
+            }
+            return LlamaClient.askStreaming(endpoint, persona.model, request.prompt, request.systemPrompt,
+                    request.json, request.imageBase64, request.imageUrl, persona.sampling);
+        }
+
         List<Endpoint> candidates = buildCandidates(request);
         if (candidates.isEmpty()) {
             throw new IOException("No endpoint available for model " + request.model);
@@ -89,7 +130,7 @@ final class RoutePlanner {
             String modelToUse = endpoint.modelToUse(request.requestedModel);
             try {
                 return LlamaClient.askStreaming(endpoint, modelToUse, request.prompt, request.systemPrompt,
-                        request.json, request.imageBase64, request.imageUrl);
+                        request.json, request.imageBase64, request.imageUrl, null);
             } catch (EndpointUnreachableException e) {
                 endpoint.coolDown(UNREACHABLE_COOLDOWN_MILLIS);
                 lastFailure = e;

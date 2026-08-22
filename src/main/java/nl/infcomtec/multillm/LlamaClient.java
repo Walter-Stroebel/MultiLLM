@@ -94,7 +94,7 @@ final class LlamaClient {
      */
     static Reply ask(Endpoint endpoint, String model, String prompt, boolean json)
             throws IOException, InterruptedException {
-        return ask(endpoint, model, prompt, null, json, null, null);
+        return ask(endpoint, model, prompt, null, json, null, null, null);
     }
 
     /**
@@ -111,8 +111,8 @@ final class LlamaClient {
      * bytes through this process.
      */
     static Reply ask(Endpoint endpoint, String model, String prompt, String systemPrompt, boolean json,
-            String imageBase64, String imageUrl) throws IOException, InterruptedException {
-        byte[] bodyBytes = buildRequestBody(model, prompt, systemPrompt, json, false, imageBase64, imageUrl);
+            String imageBase64, String imageUrl, SamplingOverride sampling) throws IOException, InterruptedException {
+        byte[] bodyBytes = buildRequestBody(model, prompt, systemPrompt, json, false, imageBase64, imageUrl, sampling);
 
         long start = System.currentTimeMillis();
         String responseBody;
@@ -159,8 +159,8 @@ final class LlamaClient {
      * stream.
      */
     static StreamingReply askStreaming(Endpoint endpoint, String model, String prompt, String systemPrompt,
-            boolean json, String imageBase64, String imageUrl) throws IOException {
-        byte[] bodyBytes = buildRequestBody(model, prompt, systemPrompt, json, true, imageBase64, imageUrl);
+            boolean json, String imageBase64, String imageUrl, SamplingOverride sampling) throws IOException {
+        byte[] bodyBytes = buildRequestBody(model, prompt, systemPrompt, json, true, imageBase64, imageUrl, sampling);
 
         int statusCode;
         HttpURLConnection conn;
@@ -212,7 +212,7 @@ final class LlamaClient {
     }
 
     private static byte[] buildRequestBody(String model, String prompt, String systemPrompt, boolean json,
-            boolean stream, String imageBase64, String imageUrl) throws IOException {
+            boolean stream, String imageBase64, String imageUrl, SamplingOverride sampling) throws IOException {
         ObjectNode body = MAPPER.createObjectNode();
         body.put("model", model);
         var messages = body.putArray("messages");
@@ -240,6 +240,23 @@ final class LlamaClient {
         }
         if (stream) {
             body.put("stream", true);
+        }
+        if (null != sampling) {
+            if (null != sampling.temperature) {
+                body.put("temperature", sampling.temperature);
+            }
+            if (null != sampling.topP) {
+                body.put("top_p", sampling.topP);
+            }
+            if (null != sampling.topK) {
+                body.put("top_k", sampling.topK);
+            }
+            if (null != sampling.minP) {
+                body.put("min_p", sampling.minP);
+            }
+            if (null != sampling.repeatPenalty) {
+                body.put("repeat_penalty", sampling.repeatPenalty);
+            }
         }
         if (null != imageBase64 || null != imageUrl) {
             // llama-server's default --slot-prompt-similarity (0.10) can route two

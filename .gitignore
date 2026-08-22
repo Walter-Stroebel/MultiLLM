@@ -3,6 +3,7 @@ target/
 
 # real endpoint config may contain API keys — only endpoints.example.json is tracked
 config/endpoints.json
+config/personas.json
 pom.xml.tag
 pom.xml.releaseBackup
 pom.xml.versionsBackup

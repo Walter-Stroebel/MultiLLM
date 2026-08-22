@@ -8,7 +8,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Loads the endpoint pool from a JSON config file. Deliberately dumb:
@@ -49,5 +51,32 @@ final class EndpointConfig {
             endpoints.add(new Endpoint(name, url, models, tier, apiKey, vision, kind));
         }
         return endpoints;
+    }
+
+    /**
+     * Loads named sampling-override aliases (e.g. {@code "drunk-gemma4"})
+     * from an optional {@code config/personas.json}, keyed by name. Absent
+     * file means an empty map — personas are an opt-in experimentation
+     * feature, not required config.
+     */
+    static Map<String, Persona> loadPersonas(File file) throws IOException {
+        Map<String, Persona> personas = new LinkedHashMap<>();
+        if (!file.isFile()) {
+            return personas;
+        }
+        JsonNode root = MAPPER.readTree(file);
+        for (JsonNode node : root) {
+            String name = node.get("name").asText();
+            String hostEndpoint = node.get("hostEndpoint").asText();
+            String model = node.get("model").asText();
+            Double temperature = node.has("temperature") ? node.get("temperature").asDouble() : null;
+            Double topP = node.has("topP") ? node.get("topP").asDouble() : null;
+            Integer topK = node.has("topK") ? node.get("topK").asInt() : null;
+            Double minP = node.has("minP") ? node.get("minP").asDouble() : null;
+            Double repeatPenalty = node.has("repeatPenalty") ? node.get("repeatPenalty").asDouble() : null;
+            SamplingOverride sampling = new SamplingOverride(temperature, topP, topK, minP, repeatPenalty);
+            personas.put(name, new Persona(name, hostEndpoint, model, sampling));
+        }
+        return personas;
     }
 }

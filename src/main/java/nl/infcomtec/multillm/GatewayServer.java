@@ -14,6 +14,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 
@@ -34,8 +35,9 @@ final class GatewayServer {
     private final String selfBaseUrl;
     private final HttpServer server;
 
-    GatewayServer(List<Endpoint> endpoints, int port, String selfBaseUrl) throws IOException {
-        this.planner = new RoutePlanner(endpoints);
+    GatewayServer(List<Endpoint> endpoints, Map<String, Persona> personas, int port, String selfBaseUrl)
+            throws IOException {
+        this.planner = new RoutePlanner(endpoints, personas);
         this.selfBaseUrl = selfBaseUrl;
         this.server = HttpServer.create(new InetSocketAddress(port), 0);
         server.createContext("/v1/chat/completions", new ChatHandler());
