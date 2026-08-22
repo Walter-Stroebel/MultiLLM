@@ -31,6 +31,7 @@ final class GatewayServer {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final RoutePlanner planner;
+    private final ThinkOrchestrator thinkOrchestrator;
     private final FileStore fileStore = new FileStore();
     private final String selfBaseUrl;
     private final HttpServer server;
@@ -38,10 +39,12 @@ final class GatewayServer {
     GatewayServer(List<Endpoint> endpoints, Map<String, Persona> personas, int port, String selfBaseUrl)
             throws IOException {
         this.planner = new RoutePlanner(endpoints, personas);
+        this.thinkOrchestrator = new ThinkOrchestrator(endpoints, personas);
         this.selfBaseUrl = selfBaseUrl;
         this.server = HttpServer.create(new InetSocketAddress(port), 0);
         server.createContext("/v1/chat/completions", new ChatHandler());
         server.createContext("/v1/files", new FilesHandler());
+        server.createContext("/v1/think", new ThinkHandler());
         server.setExecutor(Executors.newCachedThreadPool());
     }
 
@@ -116,6 +119,73 @@ final class GatewayServer {
             ObjectNode usage = body.putObject("usage");
             usage.put("completion_tokens", reply.completionTokens);
             body.put("served_by", reply.servedBy);
+
+            byte[] bytes = MAPPER.writeValueAsBytes(body);
+            exchange.getResponseHeaders().add("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, bytes.length);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write(bytes);
+            }
+        }
+    }
+
+    /**
+     * The "help me think about X" endpoint: runs {@link ThinkOrchestrator}'s
+     * divergent-then-convergent pass and returns both stages. Unlike
+     * {@link ChatHandler}, a failure in the second (convergent/judge) call
+     * is not a request failure — see {@link ThinkOrchestrator#run} — so
+     * only an {@link IOException} thrown before any divergent result exists
+     * (persona/endpoint resolution, or the divergent call itself failing)
+     * produces an error response here.
+     */
+    private final class ThinkHandler implements HttpHandler {
+
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!"POST".equals(exchange.getRequestMethod())) {
+                sendError(exchange, 405, "Method not allowed");
+                return;
+            }
+            try {
+                JsonNode root = MAPPER.readTree(exchange.getRequestBody());
+                ThinkRequest request = ThinkRequest.parse(root);
+                ThinkOrchestrator.ThinkReply reply = thinkOrchestrator.run(request);
+                sendThinkReply(exchange, request, reply);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                sendError(exchange, 503, "Interrupted");
+            } catch (IOException e) {
+                sendError(exchange, 502, e.getMessage());
+            }
+        }
+
+        private void sendThinkReply(HttpExchange exchange, ThinkRequest request, ThinkOrchestrator.ThinkReply reply)
+                throws IOException {
+            ObjectNode body = MAPPER.createObjectNode();
+            body.put("id", "think-" + UUID.randomUUID());
+            body.put("prompt", request.prompt);
+
+            ObjectNode divergent = body.putObject("divergent");
+            divergent.put("persona", reply.divergent.persona);
+            divergent.put("servedBy", reply.divergent.servedBy);
+            divergent.put("content", reply.divergent.content);
+
+            if (null != reply.convergent) {
+                ObjectNode convergent = body.putObject("convergent");
+                convergent.put("persona", reply.convergent.persona);
+                convergent.put("servedBy", reply.convergent.servedBy);
+                convergent.put("summary", reply.convergent.summary);
+                var itemsArray = convergent.putArray("items");
+                for (ThinkOrchestrator.ConvergentItem item : reply.convergent.items) {
+                    ObjectNode itemNode = itemsArray.addObject();
+                    itemNode.put("claim", item.claim);
+                    itemNode.put("verdict", item.verdict);
+                    itemNode.put("reasoning", item.reasoning);
+                }
+            } else {
+                body.putNull("convergent");
+                body.put("error", reply.convergentError);
+            }
 
             byte[] bytes = MAPPER.writeValueAsBytes(body);
             exchange.getResponseHeaders().add("Content-Type", "application/json");
