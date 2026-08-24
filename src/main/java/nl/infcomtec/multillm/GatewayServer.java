@@ -65,20 +65,29 @@ final class GatewayServer {
                 sendError(exchange, 405, "Method not allowed");
                 return;
             }
+            long start = System.currentTimeMillis();
+            String requestedModel = null;
             try {
                 JsonNode root = MAPPER.readTree(exchange.getRequestBody());
                 ChatRequest request = ChatRequest.parse(root);
+                requestedModel = request.requestedModel;
                 if (request.stream) {
                     LlamaClient.StreamingReply reply = planner.routeStreaming(request);
+                    GatewayLog.request("/v1/chat/completions[stream]", requestedModel, reply.servedBy,
+                            reply.servedModel, 200, System.currentTimeMillis() - start);
                     relayStream(exchange, reply);
                 } else {
                     LlamaClient.Reply reply = planner.route(request);
+                    GatewayLog.request("/v1/chat/completions", requestedModel, reply.servedBy, reply.servedModel,
+                            200, System.currentTimeMillis() - start);
                     sendChatReply(exchange, reply);
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
+                GatewayLog.error("/v1/chat/completions", requestedModel, 503, "Interrupted");
                 sendError(exchange, 503, "Interrupted");
             } catch (IOException e) {
+                GatewayLog.error("/v1/chat/completions", requestedModel, 502, e.getMessage());
                 sendError(exchange, 502, e.getMessage());
             }
         }
@@ -151,15 +160,21 @@ final class GatewayServer {
                 sendError(exchange, 405, "Method not allowed");
                 return;
             }
+            long start = System.currentTimeMillis();
             try {
                 JsonNode root = MAPPER.readTree(exchange.getRequestBody());
                 ThinkRequest request = ThinkRequest.parse(root);
                 ThinkOrchestrator.ThinkReply reply = thinkOrchestrator.run(request);
+                GatewayLog.request("/v1/think", request.divergentPersona, reply.divergent.servedBy,
+                        null != reply.convergent ? reply.convergent.servedBy : "n/a", 200,
+                        System.currentTimeMillis() - start);
                 sendThinkReply(exchange, request, reply);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
+                GatewayLog.error("/v1/think", null, 503, "Interrupted");
                 sendError(exchange, 503, "Interrupted");
             } catch (IOException e) {
+                GatewayLog.error("/v1/think", null, 502, e.getMessage());
                 sendError(exchange, 502, e.getMessage());
             }
         }

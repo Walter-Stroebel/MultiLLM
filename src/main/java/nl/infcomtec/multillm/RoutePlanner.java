@@ -70,6 +70,7 @@ final class RoutePlanner {
                         request.imageBase64, request.imageUrl, null);
             } catch (EndpointUnreachableException e) {
                 endpoint.coolDown(UNREACHABLE_COOLDOWN_MILLIS);
+                GatewayLog.cooldown(endpoint.name, e.getMessage(), UNREACHABLE_COOLDOWN_MILLIS);
                 lastFailure = e;
                 if (!request.allowFallbacks) {
                     break;
@@ -133,6 +134,7 @@ final class RoutePlanner {
                         request.json, request.imageBase64, request.imageUrl, null);
             } catch (EndpointUnreachableException e) {
                 endpoint.coolDown(UNREACHABLE_COOLDOWN_MILLIS);
+                GatewayLog.cooldown(endpoint.name, e.getMessage(), UNREACHABLE_COOLDOWN_MILLIS);
                 lastFailure = e;
                 if (!request.allowFallbacks) {
                     break;
