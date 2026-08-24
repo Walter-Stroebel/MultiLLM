@@ -13,8 +13,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 
@@ -35,16 +37,19 @@ final class GatewayServer {
     private final FileStore fileStore = new FileStore();
     private final String selfBaseUrl;
     private final HttpServer server;
+    private final List<Endpoint> endpoints;
 
     GatewayServer(List<Endpoint> endpoints, Map<String, Persona> personas, int port, String selfBaseUrl)
             throws IOException {
         this.planner = new RoutePlanner(endpoints, personas);
         this.thinkOrchestrator = new ThinkOrchestrator(endpoints, personas);
         this.selfBaseUrl = selfBaseUrl;
+        this.endpoints = endpoints;
         this.server = HttpServer.create(new InetSocketAddress(port), 0);
         server.createContext("/v1/chat/completions", new ChatHandler());
         server.createContext("/v1/files", new FilesHandler());
         server.createContext("/v1/think", new ThinkHandler());
+        server.createContext("/v1/models", new ModelsHandler());
         server.setExecutor(Executors.newCachedThreadPool());
     }
 
@@ -238,6 +243,45 @@ final class GatewayServer {
                 return;
             }
             exchange.getResponseHeaders().add("Content-Type", fileStore.getContentType(id));
+            exchange.sendResponseHeaders(200, bytes.length);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write(bytes);
+            }
+        }
+    }
+
+    /**
+     * Static handshake stub for OpenAI-compatible clients (HA's "OpenAI
+     * Conversation" integration, model-picker dropdowns, etc.) that call
+     * {@code GET /v1/models} to validate an endpoint before ever calling
+     * {@code /v1/chat/completions}. Lists every distinct model name across
+     * all configured endpoints; no per-model detail beyond id is available
+     * or needed for a handshake check.
+     */
+    private final class ModelsHandler implements HttpHandler {
+
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!"GET".equals(exchange.getRequestMethod())) {
+                sendError(exchange, 405, "Method not allowed");
+                return;
+            }
+            Set<String> modelNames = new LinkedHashSet<>();
+            for (Endpoint endpoint : endpoints) {
+                modelNames.addAll(endpoint.models);
+            }
+            ObjectNode body = MAPPER.createObjectNode();
+            body.put("object", "list");
+            var data = body.putArray("data");
+            for (String model : modelNames) {
+                ObjectNode entry = data.addObject();
+                entry.put("id", model);
+                entry.put("object", "model");
+                entry.put("created", 0);
+                entry.put("owned_by", "multillm");
+            }
+            byte[] bytes = MAPPER.writeValueAsBytes(body);
+            exchange.getResponseHeaders().add("Content-Type", "application/json");
             exchange.sendResponseHeaders(200, bytes.length);
             try (OutputStream out = exchange.getResponseBody()) {
                 out.write(bytes);
