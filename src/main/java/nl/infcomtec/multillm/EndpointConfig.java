@@ -22,6 +22,11 @@ import java.util.Map;
  * explicitly even for a pass-through gateway like OpenRouter — no
  * wildcard, since that would let any request silently route to a paid
  * model nobody approved spending on.
+ * <p>
+ * The file is either a bare JSON array of endpoint objects (the original
+ * and still-supported form) or an object {@code { "endpoints": [ ... ],
+ * "inspector": { ... } }} that adds gateway-wide settings alongside the
+ * list. New keys only add features; a plain array keeps working unchanged.
  */
 final class EndpointConfig {
 
@@ -30,8 +35,25 @@ final class EndpointConfig {
     private EndpointConfig() {
     }
 
-    static List<Endpoint> load(File file) throws IOException {
+    /** The endpoint array, whether the file is a bare array or the wrapper object. */
+    private static JsonNode endpointArray(JsonNode root) {
+        return root.isArray() ? root : root.get("endpoints");
+    }
+
+    /**
+     * The {@code "inspector"} block, or a disabled default when the file is
+     * a bare array or omits it.
+     */
+    static InspectorConfig loadInspector(File file) throws IOException {
         JsonNode root = MAPPER.readTree(file);
+        if (root.isArray()) {
+            return InspectorConfig.disabled();
+        }
+        return InspectorConfig.from(root.get("inspector"));
+    }
+
+    static List<Endpoint> load(File file) throws IOException {
+        JsonNode root = endpointArray(MAPPER.readTree(file));
         List<Endpoint> endpoints = new ArrayList<>();
         for (JsonNode node : root) {
             String name = node.get("name").asText();

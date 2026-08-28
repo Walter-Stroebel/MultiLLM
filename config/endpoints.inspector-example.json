@@ -1,0 +1,42 @@
+{
+  "_comment": [
+    "The wrapper form of config/endpoints.json: a { \"endpoints\": [...], \"inspector\": {...} }",
+    "object instead of a bare array. A bare array still works and is the normal case;",
+    "this form only ADDS the optional gateway-wide \"inspector\" block.",
+    "",
+    "The inspector opens a local Swing window listing the last N LLM calls; click one",
+    "to see its assembled URL, headers, and full request/response bodies. It exists for",
+    "D and T, A at the most — NEVER production: enabling it turns a headless backend",
+    "into one with a GUI, and it surfaces detail (potentially including credentials)",
+    "that only the key holder / bill payer should authorise. Absent block, or",
+    "\"enabled\": false, means the gateway runs headless exactly as before.",
+    "",
+    "  enabled        launch the window and start capturing (default false)",
+    "  maxCalls       ring size — only the most recent this-many calls are retained",
+    "  revealSecrets  show real credential values instead of <redacted> (default false;",
+    "                 the owner asserting this screen is theirs alone)"
+  ],
+  "endpoints": [
+    {
+      "name": "predator",
+      "url": "http://predator:8081",
+      "models": ["gemma-vision"],
+      "costTier": "free",
+      "kind": "local",
+      "vision": true
+    },
+    {
+      "name": "openai-example",
+      "url": "https://api.openai.com",
+      "models": ["gpt-4o-mini"],
+      "costTier": "cheap",
+      "kind": "remote",
+      "apiKey": "sk-replace-me"
+    }
+  ],
+  "inspector": {
+    "enabled": true,
+    "maxCalls": 50,
+    "revealSecrets": false
+  }
+}

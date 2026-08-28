@@ -6,6 +6,7 @@ package nl.infcomtec.multillm;
 import java.io.File;
 import java.util.List;
 import java.util.Map;
+import nl.infcomtec.nethttp.Rest;
 
 /**
  * Entry point. Loads the endpoint pool from {@code config/endpoints.json}
@@ -31,6 +32,17 @@ public final class MultiLLM {
         }
         List<Endpoint> endpoints = EndpointConfig.load(configFile);
         System.out.println("Loaded " + endpoints.size() + " endpoint(s) from " + configFile);
+
+        InspectorConfig inspector = EndpointConfig.loadInspector(configFile);
+        if (inspector.enabled) {
+            Rest.revealSecretsInTranscript = inspector.revealSecrets;
+            CallLog.enable(inspector.maxCalls);
+            System.out.println("INSPECTOR ENABLED — the last " + inspector.maxCalls
+                    + " LLM calls (assembled URL, headers, request/response bodies"
+                    + (inspector.revealSecrets ? ", credentials IN CLEAR" : ", credentials masked")
+                    + ") are visible in a local GUI window. This is a D&T/A feature, never P.");
+            InspectorFrame.launch(inspector.revealSecrets);
+        }
 
         Map<String, Persona> personas = EndpointConfig.loadPersonas(new File("config/personas.json"));
         if (!personas.isEmpty()) {

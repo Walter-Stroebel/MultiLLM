@@ -11,6 +11,13 @@
             <artifactId>jackson-databind</artifactId>
             <version>2.18.2</version>
         </dependency>
+        <!-- Required by the vendored nl.infcomtec.jacksonwrap.JSON (JavaTimeModule);
+             jackson-core/-annotations arrive transitively via databind, jsr310 does not. -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-jsr310</artifactId>
+            <version>2.18.2</version>
+        </dependency>
     </dependencies>
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>

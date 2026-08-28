@@ -10,10 +10,15 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.ConnectException;
 import java.net.HttpURLConnection;
+import java.net.NoRouteToHostException;
 import java.net.URI;
 import java.net.URL;
+import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
+import nl.infcomtec.nethttp.Rest;
+import nl.infcomtec.nethttp.Transcript;
 
 /**
  * Plain OpenAI-compatible chat-completions client, per {@code ttok}'s
@@ -23,28 +28,40 @@ import java.nio.charset.StandardCharsets;
  * serving the model. One-shot, stateless calls only, matching the
  * "each call is an ant: local, ignorant, disposable" model.
  * <p>
- * Uses {@link HttpURLConnection} (opened fresh per call via
- * {@link URL#openConnection()}), not {@code java.net.http.HttpClient}.
- * Checked, not assumed: {@code HttpClient.newHttpClient().version()}
- * reports {@code HTTP_2} by default — it attempts HTTP/2 upgrade
- * negotiation against every endpoint, including plain HTTP/1.1-only
- * local servers like llama-server. Real, observed symptom under
- * concurrent multi-endpoint load: llama-server's own log showed every
- * request processed in under two seconds once it arrived, but requests
- * sat for gaps of up to several minutes before arriving at all — the
- * delay was entirely client-side, before the request was even sent
- * over the wire, consistent with protocol negotiation overhead rather
- * than anything server-side. {@code HttpURLConnection} predates
- * HTTP/2 entirely — no negotiation, no shared connection pool or
- * executor to reason about — while still handling chunked encoding,
- * Content-Length framing, and TLS correctly instead of that being
- * hand-rolled here.
+ * <b>Transport.</b> The buffered {@link #ask} path runs on the vendored
+ * {@code nl.infcomtec.nethttp.Rest} — a non-throwing {@code java.net.http}
+ * wrapper that captures a full {@link Transcript} (request as sent,
+ * response as received, timing, errors) of every call as a side effect.
+ * That transcript is what the config-gated call inspector renders; see
+ * {@link CallLog}.
+ * <p>
+ * {@code Rest} pins the underlying {@code HttpClient} to <b>HTTP/1.1</b>
+ * ({@code Rest.useHttp2} left {@code false}). This matters and must not
+ * be "modernized" away: {@code HttpClient} defaults to {@code HTTP_2},
+ * which attempts an HTTP/2 upgrade negotiation against every endpoint,
+ * including plain HTTP/1.1-only local servers like llama-server. Observed
+ * symptom under concurrent multi-endpoint load: llama-server's own log
+ * showed every request processed in under two seconds once it arrived,
+ * but requests sat for gaps of up to several minutes before arriving at
+ * all — the delay was entirely client-side, before the request was even
+ * sent over the wire, consistent with protocol negotiation overhead. The
+ * previous transport here was raw {@link HttpURLConnection} for the same
+ * reason; {@code Rest}'s HTTP/1.1 pin preserves that.
+ * <p>
+ * <b>No timeout.</b> Neither {@code Rest} nor this class sets a connect
+ * or read timeout — a call waits as long as the backend takes, and a
+ * connection the backend closes is reported as the failure it is. This
+ * is deliberate and matches {@code Rest}'s design stance: latency
+ * expectations are the caller's concern, never the transport's.
+ * <p>
+ * The streaming path ({@link #askStreaming}) stays on
+ * {@link HttpURLConnection}: {@code Rest} buffers the whole response body,
+ * whereas the gateway's SSE relay needs the raw {@link InputStream} to
+ * pump bytes straight through.
  */
 final class LlamaClient {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final int CONNECT_TIMEOUT_MILLIS = 10_000;
-    private static final int READ_TIMEOUT_MILLIS = 120_000;
 
     private LlamaClient() {
     }
@@ -114,26 +131,29 @@ final class LlamaClient {
             String imageBase64, String imageUrl, SamplingOverride sampling) throws IOException, InterruptedException {
         byte[] bodyBytes = buildRequestBody(model, prompt, systemPrompt, json, false, imageBase64, imageUrl, sampling);
 
-        long start = System.currentTimeMillis();
-        String responseBody;
-        int statusCode;
-        try {
-            HttpURLConnection conn = openConnection(endpoint, bodyBytes);
-            statusCode = conn.getResponseCode();
-            InputStream in = (200 <= statusCode && statusCode < 300) ? conn.getInputStream() : conn.getErrorStream();
-            responseBody = (null == in) ? "" : readAll(in);
-            conn.disconnect();
-        } catch (java.net.SocketTimeoutException e) {
-            throw new EndpointUnreachableException("Timed out waiting for " + endpoint.name + " at " + endpoint.url, e);
-        } catch (java.net.ConnectException | java.net.UnknownHostException | java.net.NoRouteToHostException
-                | javax.net.ssl.SSLException e) {
-            throw new EndpointUnreachableException("Cannot reach " + endpoint.name + " at " + endpoint.url, e);
+        Rest<JsonNode> rest = new Rest<JsonNode>()
+                .base(endpoint.url + "/v1/chat/completions")
+                .verb(Rest.Verb.POST)
+                .header("Content-Type", "application/json")
+                .bodyText(new String(bodyBytes, StandardCharsets.UTF_8));
+        if (null != endpoint.apiKey) {
+            rest.header("Authorization", "Bearer " + endpoint.apiKey);
         }
-        long elapsed = System.currentTimeMillis() - start;
 
+        JsonNode root = rest.bodyAs(JsonNode.class);
+        Transcript transcript = rest.transcript();
+        CallLog.record(endpoint.name, model, transcript);
+
+        if (null == root) {
+            // Rest collects failures rather than throwing; translate the first
+            // one into the exception RoutePlanner's fallthrough logic expects.
+            throw translate(endpoint, rest, transcript);
+        }
+
+        int statusCode = transcript.status;
+        String responseBody = null != transcript.responseBody ? transcript.responseBody : "";
         checkStatus(endpoint, statusCode, responseBody);
 
-        JsonNode root = MAPPER.readTree(responseBody);
         JsonNode choices = root.get("choices");
         if (null == choices || 0 == choices.size()) {
             throw new IOException("No choices in response from " + endpoint.name + ": " + responseBody);
@@ -144,7 +164,50 @@ final class LlamaClient {
         if (null != usage && usage.has("completion_tokens")) {
             completionTokens = usage.get("completion_tokens").asInt();
         }
-        return new Reply(content, completionTokens, elapsed, endpoint.name, model);
+        return new Reply(content, completionTokens, transcript.totalMillis(), endpoint.name, model);
+    }
+
+    /**
+     * Maps a failed {@link Rest} call (which threw nothing, only collected)
+     * onto the exception type {@link RoutePlanner} keys its fallthrough on.
+     * <p>
+     * The split is by <i>whether an HTTP response arrived at all</i>, not by
+     * status code:
+     * <ul>
+     *   <li>A response came back ({@code transcript.status > 0}) — even a 500,
+     *       even with a body that didn't parse: it is an application-level
+     *       outcome. Plain {@link IOException}; the caller and the inspector
+     *       see it, {@link RoutePlanner} does not cool the endpoint down or
+     *       try another one.</li>
+     *   <li>No response — connection refused, DNS failure, no route, SSL
+     *       handshake failure, connection dropped before a status line:
+     *       {@link EndpointUnreachableException}, so the planner cools this
+     *       endpoint and moves to the next candidate.</li>
+     *   <li>Neither (a bad URL, a request that never left): plain
+     *       {@link IOException} — nothing to fall through to.</li>
+     * </ul>
+     */
+    private static IOException translate(Endpoint endpoint, Rest<?> rest, Transcript transcript) {
+        if (transcript.status > 0) {
+            String body = null != transcript.responseBody ? transcript.responseBody : "";
+            return new IOException("Chat completion failed on " + endpoint.name
+                    + ": HTTP " + transcript.status + " " + body);
+        }
+        Exception first = rest.firstError();
+        if (first instanceof ConnectException || first instanceof UnknownHostException
+                || first instanceof NoRouteToHostException || first instanceof javax.net.ssl.SSLException
+                || first instanceof java.io.InterruptedIOException) {
+            return new EndpointUnreachableException("Cannot reach " + endpoint.name + " at " + endpoint.url, first);
+        }
+        if (first instanceof IOException) {
+            // Some other transport-level IOException with no response — e.g. the
+            // connection dropped mid-flight. No HTTP outcome to report, so treat
+            // it as unreachable and let another candidate try.
+            return new EndpointUnreachableException("Call to " + endpoint.name + " at " + endpoint.url
+                    + " failed: " + first.getMessage(), first);
+        }
+        String detail = null != first ? first.toString() : "no response, no error recorded";
+        return new IOException("Chat completion failed on " + endpoint.name + ": " + detail);
     }
 
     /**
@@ -167,10 +230,12 @@ final class LlamaClient {
         try {
             conn = openConnection(endpoint, bodyBytes);
             statusCode = conn.getResponseCode();
-        } catch (java.net.SocketTimeoutException e) {
-            throw new EndpointUnreachableException("Timed out waiting for " + endpoint.name + " at " + endpoint.url, e);
-        } catch (java.net.ConnectException | java.net.UnknownHostException | java.net.NoRouteToHostException
-                | javax.net.ssl.SSLException e) {
+        } catch (UnknownHostException | java.net.SocketException
+                | javax.net.ssl.SSLException | java.io.InterruptedIOException e) {
+            // No HTTP response reached us — connection refused/reset, DNS, route,
+            // TLS, or the socket gave out. Unreachable: let RoutePlanner try the
+            // next candidate. Anything with a status line is handled below and is
+            // NOT a fallthrough case, same split as the buffered path's translate().
             throw new EndpointUnreachableException("Cannot reach " + endpoint.name + " at " + endpoint.url, e);
         }
 
@@ -183,11 +248,19 @@ final class LlamaClient {
         return new StreamingReply(conn.getInputStream(), endpoint.name, model);
     }
 
+    /**
+     * A non-200 status is an <i>application-level</i> outcome, not a
+     * connectivity failure — a 500 for "no such model", a 400 for a
+     * malformed body, a 429 for rate limiting are all things the caller
+     * (and the inspector) should see verbatim, not something to retry
+     * behind their back. So every non-200 becomes a plain
+     * {@link IOException}: {@link RoutePlanner} does not treat it as
+     * unreachable, does not cool the endpoint down, and does not fall
+     * through to another candidate. Only a genuine transport failure —
+     * no HTTP response at all — is {@link EndpointUnreachableException},
+     * and that is raised at the point the connection fails, not here.
+     */
     private static void checkStatus(Endpoint endpoint, int statusCode, String responseBody) throws IOException {
-        if (500 <= statusCode) {
-            throw new EndpointUnreachableException("Chat completion failed on " + endpoint.name
-                    + ": HTTP " + statusCode + " " + responseBody);
-        }
         if (200 != statusCode) {
             throw new IOException("Chat completion failed on " + endpoint.name
                     + ": HTTP " + statusCode + " " + responseBody);
@@ -199,8 +272,9 @@ final class LlamaClient {
         HttpURLConnection conn = (HttpURLConnection) uri.toURL().openConnection();
         conn.setRequestMethod("POST");
         conn.setDoOutput(true);
-        conn.setConnectTimeout(CONNECT_TIMEOUT_MILLIS);
-        conn.setReadTimeout(READ_TIMEOUT_MILLIS);
+        // No connect/read timeout, by design (matches the Rest transport on the
+        // buffered path): a call waits as long as the backend takes, and a
+        // connection the backend closes is reported as the failure it is.
         conn.setRequestProperty("Content-Type", "application/json");
         if (null != endpoint.apiKey) {
             conn.setRequestProperty("Authorization", "Bearer " + endpoint.apiKey);
