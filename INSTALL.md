@@ -105,7 +105,7 @@ Defaults to port 8085. Starts the gateway and prints its self URL
 loaded.
 
 ```bash
-java -jar target/MultiLLM-1.2.0-jar-with-dependencies.jar
+java -jar target/MultiLLM-1.3.0-jar-with-dependencies.jar
 ```
 ```
 Loaded 3 endpoint(s) from config/endpoints.json
@@ -130,7 +130,7 @@ path instead:
 ```bash
 mvn package
 sudo mkdir -p /usr/local/lib/multillm/config
-sudo cp target/MultiLLM-1.2.0-jar-with-dependencies.jar /usr/local/lib/multillm/MultiLLM.jar
+sudo cp target/MultiLLM-1.3.0-jar-with-dependencies.jar /usr/local/lib/multillm/MultiLLM.jar
 sudo cp config/endpoints.json /usr/local/lib/multillm/config/endpoints.json   # your real config, if any
 sudo chown -R root:root /usr/local/lib/multillm
 sudo chmod 600 /usr/local/lib/multillm/config/endpoints.json                 # may contain API keys
