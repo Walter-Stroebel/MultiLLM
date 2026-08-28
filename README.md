@@ -63,8 +63,9 @@ at — no per-project reinvention.
 
 - **`INSTALL.md`** — requirements, build, configure, run, run as a
   system service.
-- **`MANUAL.md`** — routing behavior, endpoint reference, and the
-  local-sampling-parameter experiments (personas, `/v1/think`).
+- **`MANUAL.md`** — routing behavior, endpoint reference, the optional
+  call inspector, and the local-sampling-parameter experiments
+  (personas, `/v1/think`).
 - **`CLAUDE.md`** — architecture notes and conventions, for anyone
   extending the code.
 
@@ -79,3 +80,8 @@ requests against a real llama-server backend with zero failures.
 Concurrency limiting is intentionally left to each backend (e.g.
 llama-server's own slot count); MultiLLM's job is routing and
 failover, not admission control.
+
+An optional local **call inspector** (a Swing window listing every LLM
+call with a full request/response detail view) is config-gated and off
+by default — a development and testing aid, not for production. See
+`MANUAL.md`.

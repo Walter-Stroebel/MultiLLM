@@ -57,6 +57,43 @@ likely to contain a real API key. Only `endpoints.example.json` (dummy
 values) is tracked. If no `config/endpoints.json` exists, MultiLLM
 falls back to the example file so the jar still runs out of the box.
 
+### Optional: the call inspector
+
+To turn on the local call-inspector GUI (see `MANUAL.md` → "The call
+inspector"), the config file takes a second, wrapper form: an object
+with the endpoint array under `"endpoints"` and an `"inspector"` block
+alongside it. `config/endpoints.inspector-example.json` is a tracked
+template.
+
+```json
+{
+  "endpoints": [
+    { "name": "predator", "url": "http://predator:8081", "models": ["gemma-vision"],
+      "kind": "local", "vision": true }
+  ],
+  "inspector": {
+    "enabled": true,
+    "maxCalls": 50,
+    "revealSecrets": false
+  }
+}
+```
+
+A bare array (no wrapper) is still valid and runs headless — the
+`"inspector"` block only *adds* the feature, it changes nothing else.
+
+- **`enabled`** — launch the inspector window and start capturing.
+  Default `false`: no window, nothing retained, no Swing on the
+  classpath at startup.
+- **`maxCalls`** — ring size; only the most recent this-many calls are
+  kept in memory.
+- **`revealSecrets`** — show real credential values in the inspector
+  instead of `<redacted>`. Default `false`.
+
+The inspector needs a display (`$DISPLAY` on Linux). It is a
+development / testing aid — see the warning in `MANUAL.md` about not
+running it in production.
+
 ## Run
 
 ```bash

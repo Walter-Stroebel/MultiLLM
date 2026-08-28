@@ -39,10 +39,21 @@ OpenRouter-aware client already knows how to steer it:
 - An image-bearing request (base64 or `image_url`) is a hard boundary:
   only endpoints declaring `"vision": true` are ever candidates,
   regardless of any other routing preference.
-- A connection failure (unreachable/timeout) cools that endpoint down
-  for 30s and falls through to the next candidate automatically — no
-  request fails just because one box is down, as long as another
-  candidate exists.
+- **A connection failure — and only a connection failure — falls
+  through.** If no HTTP response comes back at all (connection refused,
+  DNS failure, no route, TLS handshake failure, socket dropped before a
+  status line), that endpoint is cooled down for 30s and the next
+  candidate is tried automatically — no request fails just because one
+  box is down, as long as another candidate exists. There is no
+  request timeout: a call waits as long as the backend takes.
+- **Any HTTP response is returned to you as-is — including errors.** A
+  `500` for "no such model", a `404`, a `429`, a `400` for a malformed
+  body: the backend answered, so MultiLLM does *not* treat it as
+  unreachable, does *not* cool the endpoint down, and does *not* try
+  another one. You get the backend's status code and error body back,
+  because that is what you need to see — not a silently-retried request
+  that hides a real problem with your call. (The call inspector, below,
+  shows the full request and response for exactly this reason.)
 
 ## Example: a plain chat request
 
@@ -59,6 +70,56 @@ for watching the policy-vs-pinned-host routing decision in action.
 A minimal Swing GUI (`DebugClient`) is also available for interactive
 testing against a running gateway, if you'd rather not shell out curl
 commands by hand.
+
+## The call inspector
+
+An optional local GUI that lists every LLM call the gateway makes and
+lets you open the full request and response for any one of them — the
+assembled URL, the headers as sent, the request body, the response
+status and body, timing, and any errors. It is fed passively as a side
+effect of each call; it is not a proxy and does not sit in the request
+path.
+
+Turn it on with the `"inspector"` block in `config/endpoints.json` (see
+`INSTALL.md` → "Optional: the call inspector"). Off by default. When on,
+startup prints a line saying so.
+
+A window titled **"MultiLLM — LLM call inspector"** opens, showing one
+row per call (time, endpoint, model, HTTP status, elapsed ms), newest
+first. Double-click a row for a tabbed detail view:
+
+- **Overview** — endpoint, model, assembled URI, status, elapsed, errors.
+- **Request** — verb, URL, headers, and the request body pretty-printed.
+- **Response** — status, headers, response body pretty-printed. A
+  streamed call has no captured body (the bytes are relayed straight
+  through) and says so.
+- **Raw transcript** — the whole call as one `curl -v` / `tcpdump -A`
+  style block, with a copy-to-clipboard button.
+
+**Credentials are masked** (`Authorization: <redacted>`, and sensitive
+query parameters) in every view unless `revealSecrets: true` is set in
+the config — the person paying the bills asserting the screen is theirs
+alone.
+
+**Images.** A vision request's image is either inlined as a huge
+`data:image/…;base64,…` blob or referenced by URL. The inspector elides
+any base64 payload over ~2 KB in the text views (shown as
+`‹N KB elided (image/png)›`) so it doesn't swamp the window or crowd out
+other calls from the ring. When the request carried an image, the
+Request tab shows a **"Copy sent image to clipboard"** button — it
+decodes the inlined base64, or fetches the image URL into memory, and
+puts the image on the system clipboard for you to paste into an image
+tool. Nothing is written to disk. One reason you might want this: paste
+the image and shrink it, to check for a downscale-OCR prompt injection —
+an image crafted so sparse pixels only resolve into legible text (which
+the vision model then "reads" as instructions) once it's scaled down.
+
+**Do not run the inspector in production.** Enabling it turns a headless
+backend into one with a GUI, and it surfaces the full content of every
+call — request bodies, response bodies, and (with `revealSecrets`)
+credentials. It is a development and testing tool. `maxCalls` bounds
+what it keeps in memory; with the inspector off, nothing is retained at
+all.
 
 ## What it deliberately doesn't do
 
