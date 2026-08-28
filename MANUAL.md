@@ -121,6 +121,27 @@ credentials. It is a development and testing tool. `maxCalls` bounds
 what it keeps in memory; with the inspector off, nothing is retained at
 all.
 
+**Not suitable as-is for enterprise / regulated environments.** The
+inspector's security model is "a competent operator on a machine they
+control" — the same stance as the rest of MultiLLM. That means, by
+design and not as an oversight:
+
+- `revealSecrets` is a config flag, not an audited per-view action —
+  there is no record of who un-masked a credential or when.
+- No access control: anyone with a session on the display where the
+  inspector runs sees every call in full. The mitigation is "don't
+  enable it on a shared box," not a permission check.
+- "Copy sent image to clipboard" moves data off the process with no
+  logging or DLP hook (deliberately — nothing touches disk).
+- The inspector runs in-process with the gateway; there is no build
+  that omits it. Keeping it out of production is a deployment policy
+  (see the DTAP note above), not something the artifact enforces.
+
+If you need audited access, RBAC, egress controls, or a
+provably-inspector-free production binary, that is a different tool —
+this one is not it, and adding those would turn it into something else
+entirely (which is roughly the story of what happened to Postman).
+
 ## What it deliberately doesn't do
 
 - No hidden spend, and no hidden exposure. `expensive` (and even
