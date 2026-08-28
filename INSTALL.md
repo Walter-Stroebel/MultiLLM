@@ -127,6 +127,8 @@ or any local account can hand itself root on the next service
 restart. Install the built jar and config to a root-owned system
 path instead:
 
+First install:
+
 ```bash
 mvn package
 sudo mkdir -p /usr/local/lib/multillm/config
@@ -140,9 +142,34 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now multillm
 ```
 
-Re-run the `cp`/`chown` steps (or a small deploy script) after every
-rebuild — the unit intentionally never points at anything under a
-user's home directory or git working tree.
+Upgrading to a new build — keep the running jar as a dated backup
+before overwriting, so a bad build can be rolled back in one command:
+
+```bash
+mvn package
+V=$(mvn -q help:evaluate -Dexpression=project.version -DforceStdout)
+sudo cp -p /usr/local/lib/multillm/MultiLLM.jar \
+           /usr/local/lib/multillm/MultiLLM.jar.pre-$V
+sudo cp target/MultiLLM-$V-jar-with-dependencies.jar /usr/local/lib/multillm/MultiLLM.jar
+sudo chown root:root /usr/local/lib/multillm/MultiLLM.jar
+sudo chmod 644 /usr/local/lib/multillm/MultiLLM.jar
+sudo systemctl restart multillm
+systemctl is-active multillm && journalctl -u multillm -n 5 --no-pager
+```
+
+Roll back to the previous jar:
+
+```bash
+sudo cp /usr/local/lib/multillm/MultiLLM.jar.pre-<version> /usr/local/lib/multillm/MultiLLM.jar
+sudo systemctl restart multillm
+```
+
+The `.pre-<version>` name records what the backup *replaces* — i.e.
+`MultiLLM.jar.pre-1.3.0` is the jar that was running before 1.3.0 went
+in. Prune old ones by hand once a release has proven stable. The unit
+intentionally never points at anything under a user's home directory or
+git working tree, so every upgrade is this explicit `cp` into the
+root-owned path.
 
 ### The systemd service is the production instance — and only that
 
