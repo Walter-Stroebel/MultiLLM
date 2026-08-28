@@ -143,3 +143,18 @@ sudo systemctl enable --now multillm
 Re-run the `cp`/`chown` steps (or a small deploy script) after every
 rebuild — the unit intentionally never points at anything under a
 user's home directory or git working tree.
+
+### The systemd service is the production instance — and only that
+
+The unit runs the gateway headless: a bare-array `endpoints.json` (no
+`"inspector"` block), doing nothing but routing traffic. That is the
+**P** deployment.
+
+The **call inspector is never part of the systemd service.** When you
+want it — for development, or to inspect what a test workload is
+actually putting on the wire — you run a *separate*, hand-started jar
+with an `inspector`-enabled config, typically on a different port, and
+you stop it when you're done. It is a D/T/A tool that happens to share
+a codebase with the production gateway, not a mode of the production
+gateway. Do not add the `"inspector"` block to the config the unit
+loads.

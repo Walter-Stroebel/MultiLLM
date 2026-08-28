@@ -121,6 +121,14 @@ credentials. It is a development and testing tool. `maxCalls` bounds
 what it keeps in memory; with the inspector off, nothing is retained at
 all.
 
+In practice this means: the production instance is the **systemd
+service** (see `INSTALL.md` → "Run as a system service"), running
+headless with a plain `endpoints.json` that has no `"inspector"` block.
+The inspector, when you want it, is a **separate jar you start by
+hand** with an inspector-enabled config on its own port, and stop when
+you're done. It shares a codebase with the production gateway; it is
+not a mode of it.
+
 **Not suitable as-is for enterprise / regulated environments.** The
 inspector's security model is "a competent operator on a machine they
 control" — the same stance as the rest of MultiLLM. That means, by
